@@ -494,260 +494,369 @@
     </footer>
 
     <script>
-        let activeSelectedRole = "Superadmin";
-        let currentTimeframe = "6H"; 
-        let tempChartInstance = null;
-        let moistureChartInstance = null;
-
-        const secureHardwareVault = [
-            { id: "HUB-GURUGRAM-01", user: "admin_ggn_hub", secret: "ggn_hub_root_key_2026" },
-            { id: "ESP-001 (Mixer Node)", user: "node_esp_001_sec", secret: "p@ss_esp32_mixer_v1" },
-            { id: "ESP-003 (Acid Storage)", user: "node_esp_003_sec", secret: "p@ss_esp32_acid_v3" }
-        ];
-
-        // Mapped lookup structures updated to categorize Today vs Yesterday timelines explicitly
-        const telemetryDatabase = {
-            "6H": {
-                labels: ['Today 12:00', 'Today 13:00', 'Today 14:00', 'Today 15:00', 'Today 16:00', 'Today 17:15'],
-                temperature: [72.0, 73.0, 75.0, 74.0, 76.0, 75.0],
-                moisture: [42.0, 44.0, 45.0, 43.0, 41.0, 40.0],
-                timestamp: "Today, 17:15:00"
-            },
-            "1D": {
-                labels: ['Today 00:00', 'Today 04:00', 'Today 08:00', 'Today 12:00', 'Today 16:00', 'Today 20:00'],
-                temperature: [68.5, 71.2, 74.8, 79.1, 76.4, 70.3],
-                moisture: [55.0, 52.3, 48.1, 42.4, 40.8, 44.2],
-                timestamp: "Today, 20:00:00"
-            },
-            "3D": {
-                labels: ['Day Before Yesterday', 'Yesterday Morning', 'Yesterday Evening', 'Today Morning', 'Today Afternoon', 'Today Evening'],
-                temperature: [70.1, 74.3, 69.8, 77.2, 75.5, 73.9],
-                moisture: [48.0, 43.1, 52.0, 41.5, 40.2, 42.1],
-                timestamp: "Today, 21:16:28"
-            },
-            "7D": {
-                labels: ['31/05', '01/06', '02/06', '03/06', '04/06', '05/06', 'Today'],
-                temperature: [74.2, 75.0, 73.8, 76.1, 74.9, 73.2, 75.0],
-                moisture: [41.2, 40.0, 43.5, 42.1, 40.8, 44.9, 40.0],
-                timestamp: "Today, 21:32:00"
-            }
-        };
-
-        function fillEmail(email, labelRole) {
-            document.getElementById('emailInput').value = email;
-            document.getElementById('passwordInput').value = 'password123';
-            activeSelectedRole = labelRole;
+        // 1. DYNAMIC SYSTEM DATABASE (Simulating a Back-end Payload)
+    const systemDatabase = {
+        "admin@system.com": {
+            role: "Superadmin",
+            password: "password123",
+            plants: [
+                {
+                    id: "PLANT-GGN",
+                    name: "Gurugram Plant",
+                    location: "Gurugram, Haryana",
+                    status: "Online",
+                    devices: {
+                        "ESP-001": { mac: "AA:BB:CC:DD:EE:01", secret: "p@ss_esp32_mixer_v1", status: "ON", minMoist: 38, maxMoist: 60, minTemp: 68, maxTemp: 85 },
+                        "ESP-003": { mac: "AA:BB:CC:DD:EE:03", secret: "p@ss_esp32_acid_v3", status: "ON", minMoist: 40, maxMoist: 65, minTemp: 65, maxTemp: 80 }
+                    }
+                },
+                {
+                    id: "PLANT-DDR",
+                    name: "Dehradun Production Core",
+                    location: "Dehradun, Uttarakhand",
+                    status: "Online",
+                    devices: {
+                        "ESP-101": { mac: "11:22:33:44:55:66", secret: "ddr_hub_secret_99", status: "ON", minMoist: 35, maxMoist: 55, minTemp: 70, maxTemp: 90 }
+                    }
+                }
+            ]
+        },
+        "partner@tech.com": {
+            role: "Tech Partner",
+            password: "password123",
+            plants: [
+                {
+                    id: "PLANT-MRT",
+                    name: "Meerut Assembly Hub",
+                    location: "Meerut, Uttar Pradesh",
+                    status: "Online",
+                    devices: {
+                        "ESP-005": { mac: "FF:EE:DD:CC:BB:AA", secret: "mrt_partner_key_x", status: "ON", minMoist: 45, maxMoist: 70, minTemp: 60, maxTemp: 78 }
+                    }
+                }
+            ]
+        },
+        "operator@factory.com": {
+            role: "Factory User",
+            password: "password123",
+            plants: [
+                {
+                    id: "PLANT-LKO",
+                    name: "Lucknow Mixing Plant",
+                    location: "Lucknow, Uttar Pradesh",
+                    status: "Online",
+                    devices: {
+                        "ESP-009": { mac: "00:11:22:33:44:55", secret: "lko_op_pass_2026", status: "ON", minMoist: 40, maxMoist: 60, minTemp: 66, maxTemp: 84 }
+                    }
+                }
+            ]
         }
+    };
 
-        function togglePasswordVisibility() {
-            const input = document.getElementById('passwordInput');
-            const icon = document.getElementById('toggleIcon');
-            if (input.type === 'password') {
-                input.type = 'text';
-                icon.setAttribute('data-lucide', 'eye-off');
-            } else {
-                input.type = 'password';
-                icon.setAttribute('data-lucide', 'eye');
-            }
-            lucide.createIcons();
+    // Simulated Telemetry Database generation matching the IDs above
+    const telemetryDatabase = {
+        "6H": { labels: ['12:00', '13:00', '14:00', '15:00', '16:00', '17:15'], timestamp: "Today, 17:15:00" },
+        "1D": { labels: ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'], timestamp: "Today, 20:00:00" },
+        "3D": { labels: ['Day Before Yesterday', 'Yesterday Mng', 'Yesterday Evg', 'Today Mng', 'Today Aft', 'Today Evg'], timestamp: "Today, 21:16:28" },
+        "7D": { labels: ['31/05', '01/06', '02/06', '03/06', '04/06', '05/06', 'Today'], timestamp: "Today, 21:32:00" }
+    };
+
+    // 2. STATE ENVIRONMENT VARIABLES
+    let currentUser = null;
+    let currentActiveDevice = null;
+    let currentActivePlant = null;
+    let currentTimeframe = "6H"; 
+    let tempChartInstance = null;
+    let moistureChartInstance = null;
+
+    // Helper to update field forms natively
+    function fillEmail(email, labelRole) {
+        document.getElementById('emailInput').value = email;
+        document.getElementById('passwordInput').value = 'password123';
+    }
+
+    function togglePasswordVisibility() {
+        const input = document.getElementById('passwordInput');
+        const icon = document.getElementById('toggleIcon');
+        if (input.type === 'password') {
+            input.type = 'text';
+            icon.setAttribute('data-lucide', 'eye-off');
+        } else {
+            input.type = 'password';
+            icon.setAttribute('data-lucide', 'eye');
         }
+        lucide.createIcons();
+    }
 
-        function login() {
-            const email = document.getElementById('emailInput').value;
+    // 3. DYNAMIC LOGIN & ROUTING HANDLER
+    function login() {
+        const email = document.getElementById('emailInput').value.trim();
+        const password = document.getElementById('passwordInput').value;
+        const errorMsg = document.getElementById('errorMessage');
+
+        if (systemDatabase[email] && systemDatabase[email].password === password) {
+            currentUser = systemDatabase[email];
+            errorMsg.classList.add('hidden');
+            
+            // Setup Shell elements
             document.getElementById('loginView').classList.add('hidden');
             document.getElementById('dashboardContainer').classList.remove('hidden');
             document.getElementById('userEmailDisplay').textContent = email;
-            document.getElementById('userBadge').textContent = activeSelectedRole;
+            document.getElementById('userBadge').textContent = currentUser.role;
 
+            // Privilege Check for Hardware Hub configuration
             const hardwareAdminOption = document.getElementById('hardwareHubBtn');
-            if (activeSelectedRole === 'Superadmin') {
+            if (currentUser.role === 'Superadmin') {
                 hardwareAdminOption.classList.remove('hidden');
             } else {
                 hardwareAdminOption.classList.add('hidden');
             }
+
+            buildPlantOverview();
             lucide.createIcons();
+        } else {
+            errorMsg.classList.remove('hidden');
         }
+    }
 
-        function logout() {
-            document.getElementById('dashboardContainer').classList.add('hidden');
-            document.getElementById('loginView').classList.remove('hidden');
-        }
+    function logout() {
+        currentUser = null;
+        currentActiveDevice = null;
+        currentActivePlant = null;
+        document.getElementById('dashboardContainer').classList.add('hidden');
+        document.getElementById('loginView').classList.remove('hidden');
+        document.getElementById('passwordInput').value = '';
+    }
 
-        function showDeviceTelemetry(deviceId) {
-            document.getElementById('plantOverviewScreen').classList.add('hidden');
-            document.getElementById('deviceTelemetryScreen').classList.remove('hidden');
-            document.getElementById('activeDeviceTitle').textContent = deviceId + " — Gurugram Plant";
+    // 4. GENERATING DOM DYNAMICALLY
+    function buildPlantOverview() {
+        const container = document.getElementById('plantOverviewScreen');
+        
+        // Reset back to header base layout programmatically
+        container.innerHTML = `
+            <div>
+                <h2 class="text-2xl font-semibold text-white">Global Control Center</h2>
+                <p class="text-sm text-gray-500 mt-1">Monitor all plant deployments, view sensor data, and control device power states.</p>
+            </div>
+            <div id="statsCounterGrid" class="grid grid-cols-1 md:grid-cols-3 gap-4"></div>
+            <div class="pt-2">
+                <h3 class="text-lg font-medium text-white tracking-wide mb-4">Live Plant Overview</h3>
+                <div id="plantsRuntimeList" class="space-y-6"></div>
+            </div>
+        `;
+
+        let totalDevices = 0;
+        currentUser.plants.forEach(p => totalDevices += Object.keys(p.devices).length);
+
+        // Compute Stat Badges
+        document.getElementById('statsCounterGrid').innerHTML = `
+            <div class="bg-[#161b22] border border-[#21262d] rounded-xl p-5 flex items-center space-x-4">
+                <div class="p-3 bg-blue-500/10 border border-blue-500/20 text-blue-400 rounded-xl"><i data-lucide="activity" class="w-6 h-6"></i></div>
+                <div><div class="text-2xl font-bold text-white font-mono">${totalDevices}</div><div class="text-xs text-gray-500 uppercase tracking-wider font-mono">Active Nodes</div></div>
+            </div>
+            <div class="bg-[#161b22] border border-[#21262d] rounded-xl p-5 flex items-center space-x-4">
+                <div class="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-xl"><i data-lucide="factory" class="w-6 h-6"></i></div>
+                <div><div class="text-2xl font-bold text-emerald-400 font-mono">ONLINE</div><div class="text-xs text-gray-500 uppercase tracking-wider font-mono">Deployments</div></div>
+            </div>
+            <div class="bg-[#161b22] border border-[#21262d] rounded-xl p-5 flex items-center space-x-4">
+                <div class="p-3 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl"><i data-lucide="alert-triangle" class="w-6 h-6"></i></div>
+                <div><div class="text-2xl font-bold text-white font-mono">0</div><div class="text-xs text-gray-500 uppercase tracking-wider font-mono">System Alerts</div></div>
+            </div>
+        `;
+
+        // Render Plants dynamically mapping nodes mapping
+        const plantsWrapper = document.getElementById('plantsRuntimeList');
+        
+        currentUser.plants.forEach(plant => {
+            const plantDiv = document.createElement('div');
+            plantDiv.className = "bg-[#161b22] border border-[#21262d] rounded-xl p-6 space-y-6";
             
-            setTimeout(() => { initCharts(currentTimeframe); }, 50);
-        }
-
-        function hideDeviceTelemetry() {
-            document.getElementById('deviceTelemetryScreen').classList.add('hidden');
-            document.getElementById('plantOverviewScreen').classList.remove('hidden');
-        }
-
-        function changeTimeframe(selectedPeriod) {
-            currentTimeframe = selectedPeriod;
-            initCharts(selectedPeriod);
-
-            const targets = ['6H', '1D', '3D', '7D'];
-            targets.forEach(period => {
-                const tBtn = document.getElementById(`btn-temp-${period}`);
-                const mBtn = document.getElementById(`btn-moist-${period}`);
-                
-                if (period === selectedPeriod) {
-                    tBtn.className = "px-1.5 py-0.5 rounded bg-[#21262d] text-[#f5c542]";
-                    mBtn.className = "px-1.5 py-0.5 rounded bg-[#21262d] text-[#f5c542]";
-                } else {
-                    tBtn.className = "px-1.5 py-0.5 rounded";
-                    mBtn.className = "px-1.5 py-0.5 rounded";
-                }
-            });
-        }
-
-        function openHardwareHub() {
-            document.getElementById('hardwareHubModal').classList.remove('hidden');
-            lucide.createIcons();
-        }
-
-        function closeHardwareHub() {
-            document.getElementById('hardwareHubModal').classList.add('hidden');
-        }
-
-        function openNewPlantForm() {
-            document.getElementById('newPlantModal').classList.remove('hidden');
-            lucide.createIcons();
-        }
-
-        function openExistingPlantsRegistry() {
-            renderCredentialTableRows();
-            document.getElementById('existingPlantsModal').classList.remove('hidden');
-            lucide.createIcons();
-        }
-
-        function renderCredentialTableRows() {
-            const tableBody = document.getElementById('credentialRegistryTableBody');
-            tableBody.innerHTML = ""; 
-
-            secureHardwareVault.forEach(device => {
-                const row = document.createElement('tr');
-                const secretDisplayField = (activeSelectedRole === "Superadmin") 
-                    ? `<span class="text-[#f5c542] font-mono select-text font-semibold">${device.secret}</span>` 
-                    : `<span class="text-emerald-500 font-bold tracking-widest text-xs">••••••••••••••••</span>`;
-
-                row.innerHTML = `
-                    <td class="p-3 font-semibold text-white">${device.id}</td>
-                    <td class="p-3 text-gray-400">${device.user}</td>
-                    <td class="p-3">${secretDisplayField}</td>
+            let deviceGridHTML = '';
+            Object.keys(plant.devices).forEach(devId => {
+                deviceGridHTML += `
+                    <div onclick="showDeviceTelemetry('${plant.id}', '${devId}')" class="flex justify-between items-center bg-[#0d1117] border border-[#21262d] hover:border-[#f5c542]/50 rounded-xl px-5 py-4 text-sm font-mono cursor-pointer group transition-all">
+                        <div class="flex items-center space-x-3">
+                            <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                            <span class="text-gray-200 font-medium group-hover:text-white">${devId}</span>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <span class="text-emerald-400 font-bold text-xs uppercase bg-emerald-500/5 px-2 py-0.5 rounded border border-emerald-500/10">${plant.devices[devId].status}</span>
+                            <i data-lucide="chevron-right" class="w-4 h-4 text-gray-600 group-hover:text-[#f5c542] transition-colors"></i>
+                        </div>
+                    </div>
                 `;
-                tableBody.appendChild(row);
             });
-        }
 
-        function closeSubModal(modalId) {
-            document.getElementById(modalId).classList.add('hidden');
-        }
-
-        function addMiniNodeRow() {
-            const container = document.getElementById('miniNodesContainer');
-            const div = document.createElement('div');
-            div.className = 'flex space-x-2 mini-node-row';
-            div.innerHTML = `
-                <input type="text" required placeholder="Tank Identity" class="w-1/2 px-3 py-2 bg-[#0d1117] border border-[#30363d] rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-[#f5c542]">
-                <input type="text" required placeholder="Node ID" class="w-1/2 px-3 py-2 bg-[#0d1117] border border-[#30363d] rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-[#f5c542]">
+            plantDiv.innerHTML = `
+                <div class="flex justify-between items-start">
+                    <div>
+                        <h4 class="text-white font-bold tracking-wide text-xl">${plant.name}</h4>
+                        <p class="text-sm text-gray-500 flex items-center mt-1"><i data-lucide="map-pin" class="w-4 h-4 mr-1"></i>${plant.location}</p>
+                    </div>
+                    <span class="text-xs px-3 py-1 font-bold rounded-full uppercase tracking-wider bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">${plant.status}</span>
+                </div>
+                <div>
+                    <div class="text-xs text-gray-500 uppercase font-mono font-semibold tracking-wider mb-3">Linked Nodes Layout</div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">${deviceGridHTML}</div>
+                </div>
             `;
-            container.appendChild(div);
+            plantsWrapper.appendChild(plantDiv);
+        });
+    }
+
+    // 5. DYNAMIC TELEMETRY LOADING
+    function showDeviceTelemetry(plantId, deviceId) {
+        currentActivePlant = currentUser.plants.find(p => p.id === plantId);
+        currentActiveDevice = currentActivePlant.devices[deviceId];
+        currentActiveDevice.nameId = deviceId; // attach programmatic key reference
+
+        document.getElementById('plantOverviewScreen').classList.add('hidden');
+        document.getElementById('deviceTelemetryScreen').classList.remove('hidden');
+        
+        // Bind Device Meta Contexts
+        document.getElementById('activeDeviceTitle').textContent = `${deviceId} — ${currentActivePlant.name}`;
+        document.getElementById('activeDeviceMac').textContent = `MAC Address: ${currentActiveDevice.mac}`;
+
+        // Populating threshold configurations
+        document.getElementById('minMoistureInput').value = currentActiveDevice.minMoist;
+        document.getElementById('maxMoistureInput').value = currentActiveDevice.maxMoist;
+        document.getElementById('minTempInput').value = currentActiveDevice.minTemp;
+        document.getElementById('maxTempInput').value = currentActiveDevice.maxTemp;
+
+        setTimeout(() => { initCharts(currentTimeframe); }, 50);
+    }
+
+    function hideDeviceTelemetry() {
+        // Save threshold configuration modifications locally on back exit action
+        if(currentActiveDevice) {
+            currentActiveDevice.minMoist = parseInt(document.getElementById('minMoistureInput').value) || 0;
+            currentActiveDevice.maxMoist = parseInt(document.getElementById('maxMoistureInput').value) || 0;
+            currentActiveDevice.minTemp = parseInt(document.getElementById('minTempInput').value) || 0;
+            currentActiveDevice.maxTemp = parseInt(document.getElementById('maxTempInput').value) || 0;
         }
 
-        function addRelayRow() {
-            const container = document.getElementById('relayBoardsContainer');
-            const div = document.createElement('div');
-            div.className = 'flex space-x-2 relay-row';
-            div.innerHTML = `
-                <input type="text" required placeholder="Relay Board MAC Address" class="w-full px-3 py-2 bg-[#0d1117] border border-[#30363d] rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-[#f5c542]">
-            `;
-            container.appendChild(div);
-        }
+        document.getElementById('deviceTelemetryScreen').classList.add('hidden');
+        document.getElementById('plantOverviewScreen').classList.remove('hidden');
+        buildPlantOverview();
+    }
 
-        function saveNewPlant() {
-            alert('Hardware layout submitted and mapped across active networks successfully.');
-            closeSubModal('newPlantModal');
-            closeHardwareHub();
-            document.getElementById('newPlantForm').reset();
-        }
+    function changeTimeframe(selectedPeriod) {
+        currentTimeframe = selectedPeriod;
+        initCharts(selectedPeriod);
 
-        function initCharts(period = "6H") {
-            if (tempChartInstance) tempChartInstance.destroy();
-            if (moistureChartInstance) moistureChartInstance.destroy();
+        ['6H', '1D', '3D', '7D'].forEach(period => {
+            const tBtn = document.getElementById(`btn-temp-${period}`);
+            const mBtn = document.getElementById(`btn-moist-${period}`);
+            if(tBtn && mBtn) {
+                const classString = period === selectedPeriod ? "px-1.5 py-0.5 rounded bg-[#21262d] text-[#f5c542]" : "px-1.5 py-0.5 rounded";
+                tBtn.className = classString;
+                mBtn.className = classString;
+            }
+        });
+    }
 
-            const datasetContext = telemetryDatabase[period];
-            const labels = datasetContext.labels;
-            const tempValues = datasetContext.temperature;
-            const moistValues = datasetContext.moisture;
+    // 6. ADAPTIVE CHART RENDER (Generates deterministic mock variations depending on hardware name)
+    function initCharts(period = "6H") {
+        if (tempChartInstance) tempChartInstance.destroy();
+        if (moistureChartInstance) moistureChartInstance.destroy();
 
-            const activeTemp = tempValues[tempValues.length - 1];
-            const activeMoist = moistValues[moistValues.length - 1];
+        const baseTimeline = telemetryDatabase[period];
+        const itemSeed = currentActiveDevice.nameId.charCodeAt(currentActiveDevice.nameId.length - 1) || 5;
 
-            document.getElementById('liveTempDisplay').textContent = activeTemp.toFixed(1) + "°F";
-            document.getElementById('liveMoistureDisplay').textContent = activeMoist.toFixed(1) + "%";
+        // Deterministic procedural generation logic based on node characteristics
+        const tempValues = baseTimeline.labels.map((_, i) => (68 + (itemSeed % 5) * 2 + Math.sin(i) * 3));
+        const moistValues = baseTimeline.labels.map((_, i) => (40 + (itemSeed % 4) * 4 + Math.cos(i) * 5));
 
-            document.getElementById('metaScalarSummary').textContent = `${activeTemp.toFixed(1)}°F Temp / ${activeMoist.toFixed(1)}% Moisture`;
-            document.getElementById('metaTimestampSummary').textContent = datasetContext.timestamp;
+        const activeTemp = tempValues[tempValues.length - 1];
+        const activeMoist = moistValues[moistValues.length - 1];
 
-            const baseChartStyling = {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { display: false } },
-                scales: {
-                    x: { 
-                        grid: { color: 'rgba(33, 38, 45, 0.4)' }, 
-                        ticks: { color: '#8b949e', font: { family: 'monospace', size: 10 } } 
-                    },
-                    y: { 
-                        grid: { color: 'rgba(33, 38, 45, 0.4)' }, 
-                        ticks: { color: '#8b949e', font: { family: 'monospace', size: 10 } } 
-                    }
-                }
-            };
+        document.getElementById('liveTempDisplay').textContent = activeTemp.toFixed(1) + "°F";
+        document.getElementById('liveMoistureDisplay').textContent = activeMoist.toFixed(1) + "%";
+        document.getElementById('metaScalarSummary').textContent = `${activeTemp.toFixed(1)}°F Temp / ${activeMoist.toFixed(1)}% Moisture`;
+        document.getElementById('metaTimestampSummary').textContent = baseTimeline.timestamp;
 
-            tempChartInstance = new Chart(document.getElementById('temperatureChart'), {
-                type: 'line',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        data: tempValues,
-                        borderColor: '#f5c542',
-                        borderWidth: 2,
-                        pointBackgroundColor: '#f5c542',
-                        pointRadius: 4,
-                        tensor: 0.1,
-                        fill: false
-                    }]
-                },
-                options: baseChartStyling
-            });
-
-            moistureChartInstance = new Chart(document.getElementById('moistureChart'), {
-                type: 'line',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        data: moistValues,
-                        borderColor: '#22d3ee',
-                        borderWidth: 2,
-                        pointBackgroundColor: '#22d3ee',
-                        pointRadius: 4,
-                        tensor: 0.1,
-                        fill: false
-                    }]
-                },
-                options: baseChartStyling
-            });
-        }
-
-        window.onload = () => {
-            lucide.createIcons();
+        const baseChartStyling = {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { grid: { color: 'rgba(33, 38, 45, 0.4)' }, ticks: { color: '#8b949e', font: { family: 'monospace', size: 10 } } },
+                y: { grid: { color: 'rgba(33, 38, 45, 0.4)' }, ticks: { color: '#8b949e', font: { family: 'monospace', size: 10 } } }
+            }
         };
+
+        tempChartInstance = new Chart(document.getElementById('temperatureChart'), {
+            type: 'line',
+            data: { labels: baseTimeline.labels, datasets: [{ data: tempValues, borderColor: '#f5c542', borderWidth: 2, pointBackgroundColor: '#f5c542', radius: 3, fill: false }] },
+            options: baseChartStyling
+        });
+
+        moistureChartInstance = new Chart(document.getElementById('moistureChart'), {
+            type: 'line',
+            data: { labels: baseTimeline.labels, datasets: [{ data: moistValues, borderColor: '#22d3ee', borderWidth: 2, pointBackgroundColor: '#22d3ee', radius: 3, fill: false }] },
+            options: baseChartStyling
+        });
+    }
+
+    // 7. REGISTRY DISCOVERY UTILITIES
+    function openHardwareHub() { document.getElementById('hardwareHubModal').classList.remove('hidden'); lucide.createIcons(); }
+    function closeHardwareHub() { document.getElementById('hardwareHubModal').classList.add('hidden'); }
+    function openNewPlantForm() { document.getElementById('newPlantModal').classList.remove('hidden'); lucide.createIcons(); }
+    function closeSubModal(modalId) { document.getElementById(modalId).classList.add('hidden'); }
+
+    function openExistingPlantsRegistry() {
+        renderCredentialTableRows();
+        document.getElementById('existingPlantsModal').classList.remove('hidden');
+        lucide.createIcons();
+    }
+
+    function renderCredentialTableRows() {
+        const tableBody = document.getElementById('credentialRegistryTableBody');
+        tableBody.innerHTML = ""; 
+
+        // Dynamically crawls our map looking for explicit profile credentials
+        Object.keys(systemDatabase).forEach(userEmail => {
+            const userObj = systemDatabase[userEmail];
+            userObj.plants.forEach(plant => {
+                Object.keys(plant.devices).forEach(devId => {
+                    const dev = plant.devices[devId];
+                    const row = document.createElement('tr');
+                    row.className = "border-b border-[#21262d]";
+                    row.innerHTML = `
+                        <td class="p-3 font-semibold text-white">${devId} (${plant.name})</td>
+                        <td class="p-3 text-gray-400">${userEmail}</td>
+                        <td class="p-3 text-[#f5c542] font-mono select-text font-semibold">${dev.secret}</td>
+                    `;
+                    tableBody.appendChild(row);
+                });
+            });
+        });
+    }
+
+    function addMiniNodeRow() {
+        const container = document.getElementById('miniNodesContainer');
+        const div = document.createElement('div'); div.className = 'flex space-x-2 mini-node-row';
+        div.innerHTML = `
+            <input type="text" required placeholder="Tank Identity" class="w-1/2 px-3 py-2 bg-[#0d1117] border border-[#30363d] rounded-lg text-white">
+            <input type="text" required placeholder="Node ID" class="w-1/2 px-3 py-2 bg-[#0d1117] border border-[#30363d] rounded-lg text-white">
+        `;
+        container.appendChild(div);
+    }
+
+    function addRelayRow() {
+        const container = document.getElementById('relayBoardsContainer');
+        const div = document.createElement('div'); div.className = 'flex space-x-2 relay-row';
+        div.innerHTML = `<input type="text" required placeholder="Relay Board MAC Address" class="w-full px-3 py-2 bg-[#0d1117] border border-[#30363d] rounded-lg text-white">`;
+        container.appendChild(div);
+    }
+
+    function saveNewPlant() {
+        alert('Hardware layout provisioned successfully.');
+        closeSubModal('newPlantModal');
+        closeHardwareHub();
+        document.getElementById('newPlantForm').reset();
+    }
+
+    window.onload = () => { lucide.createIcons(); };    
     </script>
 </body>
 </html>
