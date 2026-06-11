@@ -9,8 +9,8 @@ class UserCreate(BaseModel):
     username: str
     email: str
     role: str
+    password: str
     factory_id: Optional[int] = None
-    password: Optional[str] = None  # Force optional fallback status
 
 class TopologyCreate(BaseModel):
     factory_id: int
