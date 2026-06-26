@@ -11,8 +11,5 @@
         "src": "/(.*)",
         "dest": "app/main.py"
       }
-    ],
-    "env": {
-      "POSTGRES_URL_ASYNC": "${POSTGRES_URL_ASYNC}"
-    }
+    ]
   }

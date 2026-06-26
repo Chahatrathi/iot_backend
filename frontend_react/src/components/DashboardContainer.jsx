@@ -43,9 +43,9 @@ export default function DashboardContainer({ session, onLogout, activeDevice, se
 
       {/* Dynamic View Toggler */}
       {!activeDevice ? (
-        <PlantOverview onSelectDevice={setActiveDevice} />
+        <PlantOverview session={session} onSelectDevice={setActiveDevice} />
       ) : (
-        <DeviceTelemetry deviceId={activeDevice} onBack={() => setActiveDevice(null)} />
+        <DeviceTelemetry session={session} deviceId={activeDevice} onBack={() => setActiveDevice(null)} />
       )}
 
       {/* Admin Topology Panel Hook */}

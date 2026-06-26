@@ -10,6 +10,8 @@ from sqlalchemy import text
 from app.config import get_db
 from app.schemas import FactoryCreate, UserCreate, TopologyCreate
 from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/onboard", tags=["Onboarding"])
 
@@ -22,6 +24,7 @@ class NodeUpdateSchema(BaseModel):
     current_mininode_id: str
     new_mininode_id: str
     relay_mac: str
+    hub_id: str
 
 class NodeAppendSchema(BaseModel):
     factory_id: int
@@ -30,6 +33,12 @@ class NodeAppendSchema(BaseModel):
 class PasswordUpdateSchema(BaseModel):
     user_id: int
     new_password: str
+
+class HardwareSwapPayload(BaseModel):
+    factory_id: int
+    component_type: str
+    old_id: str
+    new_id: str
 
 
 @router.post("/factory", status_code=status.HTTP_201_CREATED)
@@ -118,73 +127,91 @@ async def onboard_topology(payload: TopologyCreate, db: AsyncSession = Depends(g
 @router.post("/batch-provision-hardware", status_code=status.HTTP_201_CREATED)
 async def batch_provision_hardware(payload: dict, db: AsyncSession = Depends(get_db)):
     factory_id = payload.get("factory_id")
-    tank_count = payload.get("tank_count")
     hub_id = payload.get("hub_id", "").strip()
-    relay_macs = payload.get("relay_macs", [])
+    
+    # Accept explicit arrays for both element types independently
+    fan_relay_macs = payload.get("fan_relay_macs", [])
+    bulb_relay_macs = payload.get("bulb_relay_macs", [])
     mininode_ids = payload.get("mininode_ids", [])
 
-    if not factory_id or not tank_count:
-        raise HTTPException(status_code=400, detail="Missing core parameters.")
+    if not factory_id:
+        raise HTTPException(status_code=400, detail="Missing core plant identifier.")
 
     try:
-        factory_id = int(factory_id)
-        tank_count = int(tank_count)
-    except (ValueError, TypeError):
-        raise HTTPException(status_code=400, detail="Boundary indicators must be integers.")
-
-    expected_relays = math.ceil(tank_count / 3)
-    if not hub_id or len(relay_macs) != expected_relays or len(mininode_ids) != tank_count:
-        raise HTTPException(status_code=400, detail="Topology dimensions mismatch constraint rules.")
-
-    try:
-        await db.execute(
-            text("INSERT INTO central_nodes (hub_id, factory_id) VALUES (:hub_id, :factory_id) ON CONFLICT (hub_id) DO NOTHING;"), 
-            {"hub_id": hub_id, "factory_id": factory_id}
-        )
-
-        for r_mac in relay_macs:
+        # 1. Ensure Hub Context is initialized
+        if hub_id:
             await db.execute(
-                text("INSERT INTO relay_boards (relay_mac, hub_id, factory_id) VALUES (:relay_mac, :hub_id, :factory_id) ON CONFLICT (relay_mac) DO NOTHING;"), 
-                {"relay_mac": r_mac.strip(), "hub_id": hub_id, "factory_id": factory_id}
+                text("INSERT INTO central_nodes (hub_id, factory_id) VALUES (:hub_id, :factory_id) ON CONFLICT (hub_id) DO NOTHING;"), 
+                {"hub_id": hub_id, "factory_id": int(factory_id)}
             )
 
+        # 2. Register all distinct Fan Relays
+        for f_mac in fan_relay_macs:
+            if f_mac.strip():
+                await db.execute(
+                    text("INSERT INTO relay_boards (relay_mac, hub_id, factory_id) VALUES (:relay_mac, :hub_id, :factory_id) ON CONFLICT (relay_mac) DO NOTHING;"), 
+                    {"relay_mac": f_mac.strip(), "hub_id": hub_id or None, "factory_id": int(factory_id)}
+                )
+
+        # 3. Register all distinct Bulb Relays
+        for b_mac in bulb_relay_macs:
+            if b_mac.strip():
+                await db.execute(
+                    text("INSERT INTO relay_boards (relay_mac, hub_id, factory_id) VALUES (:relay_mac, :hub_id, :factory_id) ON CONFLICT (relay_mac) DO NOTHING;"), 
+                    {"relay_mac": b_mac.strip(), "hub_id": hub_id or None, "factory_id": int(factory_id)}
+                )
+
+        # 4. Iterate and update Tank Mini-Nodes with split routing maps
         for idx, m_id in enumerate(mininode_ids):
-            assigned_relay = relay_macs[idx // 3].strip()
+            if not str(m_id).strip():
+                continue
+
+            # Handle flexible array fallback limits safely
+            assigned_fan_relay = fan_relay_macs[min(idx, len(fan_relay_macs) - 1)].strip() if fan_relay_macs else "UNASSIGNED"
+            assigned_bulb_relay = bulb_relay_macs[min(idx, len(bulb_relay_macs) - 1)].strip() if bulb_relay_macs else "UNASSIGNED"
+
+            # Dynamic terminal positioning assignment loops
             position_on_relay = idx % 3
             dynamic_fan_ch = (position_on_relay * 2) + 1
             dynamic_bulb_ch = (position_on_relay * 2) + 2
             
             await db.execute(
                 text("""
-                    INSERT INTO mini_nodes (mininode_id, hub_id, relay_mac, fan_channel, bulb_channel) 
-                    VALUES (:mininode_id, :hub_id, :relay_mac, :fan_ch, :bulb_ch)
+                    INSERT INTO mini_nodes (mininode_id, hub_id, fan_relay_mac, bulb_relay_mac, fan_channel, bulb_channel) 
+                    VALUES (:mininode_id, :hub_id, :fan_rmac, :bulb_rmac, :fan_ch, :bulb_ch)
                     ON CONFLICT (mininode_id) DO UPDATE 
-                    SET fan_channel = EXCLUDED.fan_channel, bulb_channel = EXCLUDED.bulb_channel;
+                    SET hub_id = EXCLUDED.hub_id,
+                        fan_relay_mac = EXCLUDED.fan_relay_mac,
+                        bulb_relay_mac = EXCLUDED.bulb_relay_mac,
+                        fan_channel = EXCLUDED.fan_channel, 
+                        bulb_channel = EXCLUDED.bulb_channel;
                 """), 
                 {
-                    "mininode_id": str(m_id).strip(), "hub_id": hub_id, "relay_mac": assigned_relay,
-                    "fan_ch": dynamic_fan_ch, "bulb_ch": dynamic_bulb_ch
+                    "mininode_id": str(m_id).strip(), 
+                    "hub_id": hub_id if hub_id else None, 
+                    "fan_rmac": assigned_fan_relay,
+                    "bulb_rmac": assigned_bulb_relay,
+                    "fan_ch": dynamic_fan_ch, 
+                    "bulb_ch": dynamic_bulb_ch
                 }
             )
 
         await db.commit()
-        return {"success": True, "manifest": {"central_node": hub_id, "relay_boards": relay_macs, "mini_nodes": mininode_ids}}
+        return {"success": True}
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database execution error: {str(e)}")
-
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 # 🌟 NATIVE LOOKUP MATCHING NATURAL PRIMARY KEY LAYOUTS
 @router.get("/fleet-topology")
 async def get_fleet_topology(db: AsyncSession = Depends(get_db)):
-    """
-    Fetches hardware topology mappings cleanly aligned with the natural mininode_id schema.
-    """
     try:
         query = text("""
             SELECT 
-                m.mininode_id, m.hub_id, m.relay_mac, 
-                m.fan_channel, m.bulb_channel, c.factory_id
+                m.mininode_id, m.hub_id, m.fan_relay_mac, m.bulb_relay_mac, m.fan_status, m.bulb_status, 
+                m.fan_channel, m.bulb_channel, m.last_seen AS node_last_seen,
+                c.factory_id, c.last_seen AS hub_last_seen
             FROM mini_nodes m
             LEFT JOIN central_nodes c ON m.hub_id = c.hub_id
             ORDER BY m.mininode_id ASC;
@@ -193,18 +220,24 @@ async def get_fleet_topology(db: AsyncSession = Depends(get_db)):
         nodes_list = []
         for row in result.mappings().all():
             nodes_list.append({
-                "id": str(row["mininode_id"]).strip(), # Piped safely for unique grid map trackers
+                "id": str(row["mininode_id"]).strip(), 
                 "mininode_id": str(row["mininode_id"]).strip(),
                 "hub_id": row["hub_id"],
-                "relay_mac": row["relay_mac"],
+                "node_last_seen": row["node_last_seen"].isoformat() if row["node_last_seen"] else None,
+                "hub_last_seen": row["hub_last_seen"].isoformat() if row["hub_last_seen"] else None,
+                "factory_id": row["factory_id"],
+                
+                # --- ADD THESE 4 MISSING LINES ---
+                "fan_relay_mac": row["fan_relay_mac"],
+                "bulb_relay_mac": row["bulb_relay_mac"],
                 "fan_channel": row["fan_channel"],
                 "bulb_channel": row["bulb_channel"],
-                "factory_id": row["factory_id"]
+                "fan_status": row["fan_status"],   # <--- NEW MAPPING
+                "bulb_status": row["bulb_status"]
             })
         return {"success": True, "fleet": nodes_list}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Topology compilation fault: {str(e)}")
-
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/directory-with-plants", tags=["Superadmin Dashboard"])
 async def get_directory_with_plants(db: AsyncSession = Depends(get_db)):
@@ -279,24 +312,30 @@ async def update_poc_password(payload: PasswordUpdateSchema, db: AsyncSession = 
 async def update_individual_mininode(payload: NodeUpdateSchema, db: AsyncSession = Depends(get_db)):
     """
     Mutates unique Node fields using natural mininode_id indices to fit strict table setups.
+    Now includes dynamic reassignment of the Central Hub ID.
     """
     try:
         query = text("""
             UPDATE mini_nodes 
-            SET mininode_id = :new_mn_id, relay_mac = :r_mac 
+            SET mininode_id = :new_mn_id, 
+                relay_mac = :r_mac,
+                hub_id = :h_id
             WHERE mininode_id = :curr_mn_id;
         """)
+        
         await db.execute(query, {
             "new_mn_id": str(payload.new_mininode_id).strip(),
             "r_mac": str(payload.relay_mac).strip(),
+            "h_id": str(payload.hub_id).strip(),
             "curr_mn_id": str(payload.current_mininode_id).strip()
         })
+        
         await db.commit()
         return {"success": True, "detail": "Hardware parameters committed seamlessly."}
+        
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Database execution crash: {str(e)}")
-
 
 @router.post("/append-hardware-nodes", status_code=status.HTTP_201_CREATED, tags=["Hardware Grid Management"])
 async def append_hardware_nodes(payload: NodeAppendSchema, db: AsyncSession = Depends(get_db)):
@@ -400,3 +439,103 @@ async def append_hardware_nodes(payload: NodeAppendSchema, db: AsyncSession = De
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Expansion execution error: {str(e)}")
+    
+
+@router.get("/poc-dashboard/{factory_id}", tags=["Plant POC Dashboard"])
+async def get_poc_dashboard(factory_id: int, db: AsyncSession = Depends(get_db)):
+    try:
+        factory_query = text("SELECT name, location FROM factories WHERE id = :fid;")
+        factory_res = await db.execute(factory_query, {"fid": factory_id})
+        factory_data = factory_res.mappings().first()
+        
+        if not factory_data:
+            raise HTTPException(status_code=404, detail="Factory mapping not found.")
+
+        query = text("""
+            SELECT 
+                m.mininode_id, m.last_seen AS node_last_seen, c.last_seen AS hub_last_seen
+            FROM mini_nodes m
+            JOIN central_nodes c ON m.hub_id = c.hub_id
+            WHERE c.factory_id = :factory_id
+            ORDER BY m.mininode_id ASC;
+        """)
+        
+        result = await db.execute(query, {"factory_id": factory_id})
+        nodes_data = []
+
+        for row in result.mappings().all():
+            nodes_data.append({
+                "mininode_id": str(row["mininode_id"]),
+                "node_last_seen": row["node_last_seen"].isoformat() if row["node_last_seen"] else None,
+                "hub_last_seen": row["hub_last_seen"].isoformat() if row["hub_last_seen"] else None
+            })
+
+        return {
+            "success": True, 
+            "factory": {
+                "name": str(factory_data["name"]),
+                "location": str(factory_data["location"]) if factory_data["location"] else "Unspecified Zone"
+            },
+            "fleet": nodes_data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+@router.post("/swap-hardware", tags=["Hardware Lifecycle"])
+async def swap_hardware(payload: HardwareSwapPayload, db: AsyncSession = Depends(get_db)):
+    try:
+        current_time = datetime.utcnow()
+        
+        if payload.component_type == "MINI_NODE":
+            # 1. Update the Mini Node Registry
+            await db.execute(
+                text("UPDATE mini_nodes SET mininode_id = :new_id WHERE mininode_id = :old_id;"),
+                {"new_id": payload.new_id, "old_id": payload.old_id}
+            )
+            # 2. Seamlessly migrate historical telemetry to the new node
+            await db.execute(
+                text("UPDATE hardware_data_received SET mininode_id = :new_id WHERE mininode_id = :old_id;"),
+                {"new_id": payload.new_id, "old_id": payload.old_id}
+            )
+            
+        elif payload.component_type == "RELAY_BOARD":
+            # Find and replace the MAC address across all node configurations
+            await db.execute(
+                text("UPDATE mini_nodes SET fan_relay_mac = :new_id WHERE fan_relay_mac = :old_id;"),
+                {"new_id": payload.new_id, "old_id": payload.old_id}
+            )
+            await db.execute(
+                text("UPDATE mini_nodes SET bulb_relay_mac = :new_id WHERE bulb_relay_mac = :old_id;"),
+                {"new_id": payload.new_id, "old_id": payload.old_id}
+            )
+            
+        elif payload.component_type == "CENTRAL_HUB":
+            # Update the Hub Registry and remap all child nodes
+            await db.execute(
+                text("UPDATE central_nodes SET hub_id = :new_id WHERE hub_id = :old_id;"),
+                {"new_id": payload.new_id, "old_id": payload.old_id}
+            )
+            await db.execute(
+                text("UPDATE mini_nodes SET hub_id = :new_id WHERE hub_id = :old_id;"),
+                {"new_id": payload.new_id, "old_id": payload.old_id}
+            )
+
+        # Log the swap for operational auditing
+        await db.execute(
+            text("""
+                INSERT INTO hardware_lifecycle_logs (factory_id, component_type, old_identifier, new_identifier, swapped_at)
+                VALUES (:fid, :ctype, :old, :new, :now);
+            """),
+            {
+                "fid": payload.factory_id, "ctype": payload.component_type, 
+                "old": payload.old_id, "new": payload.new_id, "now": current_time
+            }
+        )
+
+        await db.commit()
+        return {"success": True, "detail": f"Successfully hot-swapped {payload.component_type}."}
+
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Swap failed: {str(e)}")
