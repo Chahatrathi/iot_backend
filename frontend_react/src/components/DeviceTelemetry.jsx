@@ -242,11 +242,19 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
       : d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
   });
   
-  const tempValues = history.map(point => point?.temperature ?? null);
+  // --- THE FIX: FILTER OUT -127 GHOST READINGS ---
+  const tempValues = history.map(point => {
+    const t = point?.temperature;
+    // Map to null if it's undefined, null, or less than -10 (Chart.js will skip nulls)
+    return (t != null && t >= -10) ? t : null;
+  });
+
   const moistureValues = history.map(point => point?.moisture ?? null);
 
-  const masterOffMarkers = history.map(point => {
-    if (!point || !point.timestamp) return null;
+  const masterOffMarkers = history.map((point, index) => {
+    const t = tempValues[index]; // Use the filtered temperature
+    if (t === null) return null; // Skip markers if the temperature was an error
+    
     const ts = String(point.timestamp);
     const pTime = new Date(ts.endsWith('Z') ? ts : `${ts}Z`).getTime();
     
@@ -256,11 +264,16 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
       const moTime = new Date(moStr.endsWith('Z') ? moStr : `${moStr}Z`).getTime();
       return Math.abs(moTime - pTime) < 1800000;
     });
-    return isMarker ? point.temperature : null;
+    return isMarker ? t : null;
   });
 
-  const latestTemp = tempValues.length > 0 ? tempValues[tempValues.length - 1] : '--';
-  const latestMoist = moistureValues.length > 0 ? moistureValues[moistureValues.length - 1] : '--';
+  // --- THE FIX: GET THE LATEST *VALID* TEMPERATURE ---
+  // We filter out the nulls first, so the badge doesn't show 'null°C' during a sensor drop
+  const validTemps = tempValues.filter(t => t !== null);
+  const latestTemp = validTemps.length > 0 ? Number(validTemps[validTemps.length - 1]).toFixed(2) : '--';
+  
+  const validMoists = moistureValues.filter(m => m !== null);
+  const latestMoist = validMoists.length > 0 ? Number(validMoists[validMoists.length - 1]).toFixed(2) : '--';
 
   // ==========================================
   // CALCULATE SMART CONNECTION STATUS (CRASH PROOF)
@@ -286,8 +299,9 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
     const hubDiffHours = hubTime > 0 ? (now - hubTime) / (1000 * 60 * 60) : Infinity;
     const nodeDiffHours = nodeTime > 0 ? (now - nodeTime) / (1000 * 60 * 60) : Infinity;
 
-    if (hubDiffHours > 5) connectionStatus = 'HUB_OFFLINE';
-    else if (nodeDiffHours > 3 || nodeTime === 0) connectionStatus = 'NODE_OFFLINE';
+    // CHANGED: 0.5 hours = 30 minutes for both Hub and Node
+    if (hubDiffHours > 0.5) connectionStatus = 'HUB_OFFLINE';
+    else if (nodeDiffHours > 0.5 || nodeTime === 0) connectionStatus = 'NODE_OFFLINE';
     else connectionStatus = 'LIVE';
 
     const displayTime = nodeTime > 0 ? nodeTime : hubTime;
@@ -333,7 +347,10 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
           </button>
           <div>
             <div className="flex items-center space-x-3">
-              <h2 className="text-xl font-bold text-white tracking-wide">Tank Telemetry Stream</h2>
+              {/* UPDATED: Added Tank Number here */}
+              <h2 className="text-xl font-bold text-white tracking-wide">
+                Tank #{deviceData.config?.node_index || '?'} Telemetry Stream
+              </h2>
               {!isAdmin && <span className="px-2 py-0.5 bg-[#21262d] text-gray-400 border border-[#30363d] rounded text-[10px] font-mono tracking-wider">READ ONLY</span>}
             </div>
             <p className="text-xs text-gray-500 font-mono mt-0.5 tracking-wider">NODE ID: {deviceId}</p>
@@ -534,9 +551,9 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
             </h4>
             <p className="text-xs text-gray-400 mt-1 max-w-xl leading-relaxed">
               {connectionStatus === 'HUB_OFFLINE'
-                ? "The main factory WiFi router is offline. Check the power source or reconnect it to the local WiFi using the mobile captive portal. All nodes are currently blind."
+                ? "The main factory WiFi router has been offline for over 30 minutes. Check the power source or reconnect it to the local WiFi using the mobile captive portal. All nodes are currently blind."
                 : connectionStatus === 'NODE_OFFLINE' 
-                ? "The central hub is online, but this specific tank hasn't reported telemetry in over 3 hours. Please check the ESP32 battery or mesh range." 
+                ? "The central hub is online, but this specific tank hasn't reported telemetry in over 30 minutes. Please check the ESP32 battery or mesh range." 
                 : connectionStatus === 'LIVE' 
                 ? "The telemetry stream is stable and syncing perfectly with the central factory hub."
                 : "Awaiting first telemetry ping from hardware."}
@@ -558,7 +575,7 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
           <span className="text-xs font-mono font-bold text-gray-300">HISTORICAL TELEMETRY SCOPE</span>
         </div>
         <div className="flex space-x-1.5 bg-[#0d1117] border border-[#21262d] p-1 rounded-md">
-          {[ {label: '12H', val: 12}, {label: '1D', val: 24}, {label: '5D', val: 120}, {label: '15D', val: 360}, {label: '30D', val: 720} ].map(btn => (
+          {[{label: '1H', val: 1},{label: '3H', val: 3}, {label: '12H', val: 12}, {label: '1D', val: 24}, {label: '5D', val: 120}, {label: '15D', val: 360}, {label: '30D', val: 720} ].map(btn => (
             <button 
               key={btn.val} 
               onClick={() => setTimeRange(btn.val)} 

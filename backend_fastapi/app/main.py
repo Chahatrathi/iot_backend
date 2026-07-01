@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_db
 from app.routers import onboarding, telemetry
+from fastapi import FastAPI
 
 app = FastAPI(title="Industrial IoT Core Mesh Infrastructure", version="1.0.0")
 
@@ -18,6 +19,27 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],  
     allow_headers=["*"],
+)
+
+
+app = FastAPI(
+    title="Process Intelligence API",
+    # Tell Swagger exactly where to look for the JSON file in production
+    openapi_url="/api/openapi.json", 
+    docs_url="/api/docs",
+    redoc_url="/api/redoc"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://iot-control-dashboard.vercel.app",  # Your Production Frontend
+        "http://localhost:5173",                     # Local Vite Frontend
+        "http://localhost:3000"                      # Local React/NextJS Frontend
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all HTTP methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],  # Allows all headers
 )
 
 # ==========================================

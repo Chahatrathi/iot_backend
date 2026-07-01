@@ -209,12 +209,16 @@ async def get_fleet_topology(db: AsyncSession = Depends(get_db)):
     try:
         query = text("""
             SELECT 
-                m.mininode_id, m.hub_id, m.fan_relay_mac, m.bulb_relay_mac, m.fan_status, m.bulb_status, 
-                m.fan_channel, m.bulb_channel, m.last_seen AS node_last_seen,
+                m.mininode_id, m.hub_id, m.fan_relay_mac, m.bulb_relay_mac, 
+                m.fan_channel, m.bulb_channel, 
+                m.fan_status, m.bulb_status, m.node_index,
+                m.last_seen AS node_last_seen,
                 c.factory_id, c.last_seen AS hub_last_seen
             FROM mini_nodes m
             LEFT JOIN central_nodes c ON m.hub_id = c.hub_id
-            ORDER BY m.mininode_id ASC;
+            
+            -- THE MAGIC FIX: Sort by the permanent physical slot index
+            ORDER BY m.node_index ASC;
         """)
         result = await db.execute(query)
         nodes_list = []
@@ -226,7 +230,7 @@ async def get_fleet_topology(db: AsyncSession = Depends(get_db)):
                 "node_last_seen": row["node_last_seen"].isoformat() if row["node_last_seen"] else None,
                 "hub_last_seen": row["hub_last_seen"].isoformat() if row["hub_last_seen"] else None,
                 "factory_id": row["factory_id"],
-                
+                "node_index": row["node_index"],
                 # --- ADD THESE 4 MISSING LINES ---
                 "fan_relay_mac": row["fan_relay_mac"],
                 "bulb_relay_mac": row["bulb_relay_mac"],
@@ -452,20 +456,30 @@ async def get_poc_dashboard(factory_id: int, db: AsyncSession = Depends(get_db))
             raise HTTPException(status_code=404, detail="Factory mapping not found.")
 
         query = text("""
-            SELECT 
-                m.mininode_id, m.last_seen AS node_last_seen, c.last_seen AS hub_last_seen
+            SELECT m.mininode_id, m.hub_id, m.fan_relay_mac, m.bulb_relay_mac, 
+                   m.fan_channel, m.bulb_channel, m.fan_status, m.bulb_status, m.node_index,
+                   m.last_seen AS node_last_seen, c.factory_id, c.last_seen AS hub_last_seen
             FROM mini_nodes m
-            JOIN central_nodes c ON m.hub_id = c.hub_id
-            WHERE c.factory_id = :factory_id
-            ORDER BY m.mininode_id ASC;
+            LEFT JOIN central_nodes c ON m.hub_id = c.hub_id
+            WHERE c.factory_id = :fid
+            ORDER BY m.node_index ASC;
         """)
         
-        result = await db.execute(query, {"factory_id": factory_id})
+        # FIX: The parameter must match the key used in the query (:fid)
+        result = await db.execute(query, {"fid": factory_id})
         nodes_data = []
 
         for row in result.mappings().all():
             nodes_data.append({
                 "mininode_id": str(row["mininode_id"]),
+                "hub_id": row["hub_id"],
+                "fan_relay_mac": row["fan_relay_mac"],
+                "bulb_relay_mac": row["bulb_relay_mac"],
+                "fan_channel": row["fan_channel"],
+                "bulb_channel": row["bulb_channel"],
+                "fan_status": row["fan_status"],
+                "bulb_status": row["bulb_status"],
+                "node_index": row["node_index"],
                 "node_last_seen": row["node_last_seen"].isoformat() if row["node_last_seen"] else None,
                 "hub_last_seen": row["hub_last_seen"].isoformat() if row["hub_last_seen"] else None
             })
@@ -479,8 +493,7 @@ async def get_poc_dashboard(factory_id: int, db: AsyncSession = Depends(get_db))
             "fleet": nodes_data
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
+        raise HTTPException(status_code=500, detail=str(e)) 
 
 @router.post("/swap-hardware", tags=["Hardware Lifecycle"])
 async def swap_hardware(payload: HardwareSwapPayload, db: AsyncSession = Depends(get_db)):

@@ -27,6 +27,7 @@ class SensorReading(BaseModel):
 
 class HubPayload(BaseModel):
     hub_id: str
+    uptime_seconds: int
     readings: List[SensorReading]
 
 class CommandAck(BaseModel):
@@ -210,7 +211,7 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
 
                     # NORMAL EMA % MATHEMATICS (Runs only if IDLE)
                     raw_dry = state.get("raw_dry_cal") or 2540
-                    raw_wet = state.get("raw_wet_cal") or 1200
+                    raw_wet = state.get("raw_wet_cal") or 700
                     if raw_dry == raw_wet: raw_dry += 1 
 
                     raw_pct = ((raw_dry - r.moisture) / (raw_dry - raw_wet)) * 100.0
@@ -276,9 +277,17 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
                         current_fan_state = state.get("fan_status", 0)
                         current_bulb_state = state.get("bulb_status", 0)
 
+                        # =====================================================================
+                        # NEW: TRUE HARDWARE STATE VERIFICATION (3-Minute Buffer)
+                        # =====================================================================
+                        expected_interval_sec = c_interval_ms / 1000
+                        # If uptime is less than interval + 180s grace period, it's a recent reboot
+                        recent_reboot = payload.uptime_seconds < (expected_interval_sec + 180)
+
                         # 3. SMART QUEUE: EXHAUST FAN
                         if target_fan_mac and target_fan_mac != "UNASSIGNED":
-                            if calculated_fan_state != current_fan_state:
+                            # OVERRIDE triggered if states differ OR if hardware recently rebooted
+                            if (calculated_fan_state != current_fan_state) or recent_reboot:
                                 # Flush old pending commands to prevent avalanches
                                 await db.execute(
                                     text("DELETE FROM relay_commands_queue WHERE hub_id = :hub_id AND relay_mac = :mac AND fan_channel IS NOT NULL AND status = 'PENDING'"),
@@ -297,12 +306,13 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
                                     text("UPDATE mini_nodes SET fan_status = :state WHERE mininode_id = :mid"),
                                     {"state": calculated_fan_state, "mid": r.mininode_id}
                                 )
-                                # Update Local Tracker (Prevents redundant queues if multiple readings in one payload)
+                                # Update Local Tracker 
                                 state["fan_status"] = calculated_fan_state
 
                         # 4. SMART QUEUE: HEATER BULB
                         if target_bulb_mac and target_bulb_mac != "UNASSIGNED":
-                            if calculated_bulb_state != current_bulb_state:
+                            # OVERRIDE triggered if states differ OR if hardware recently rebooted
+                            if (calculated_bulb_state != current_bulb_state) or recent_reboot:
                                 # Flush old pending commands
                                 await db.execute(
                                     text("DELETE FROM relay_commands_queue WHERE hub_id = :hub_id AND relay_mac = :mac AND bulb_channel IS NOT NULL AND status = 'PENDING'"),
@@ -322,8 +332,6 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
                                     {"state": calculated_bulb_state, "mid": r.mininode_id}
                                 )
                                 state["bulb_status"] = calculated_bulb_state
-                    # =====================================================================
-
             # Insert normal telemetry into database
             if batch_data:
                 insert_telemetry_query = text("""
@@ -456,10 +464,10 @@ async def update_telemetry_interval(payload: IntervalUpdateRequest, db: AsyncSes
 async def get_device_details(mininode_id: str, hours: int = 24, db: AsyncSession = Depends(get_db)):
     try:
         config_query = text("""
-            SELECT m.mininode_id, m.fan_relay_mac, m.bulb_relay_mac, m.temp_min, m.temp_max, 
+            SELECT m.mininode_id, m.fan_relay_mac, m.bulb_relay_mac, m.temp_min, m.temp_max,
                    m.moisture_min, m.moisture_max, m.telemetry_interval_ms, m.cycle_status, m.hub_id,
                    m.last_seen AS node_last_seen, c.last_seen AS hub_last_seen, m.cycle_start_time,
-                   m.fan_channel, m.bulb_channel, m.fan_status, m.bulb_status
+                   m.fan_channel, m.bulb_channel, m.fan_status, m.bulb_status, m.node_index
             FROM mini_nodes m
             LEFT JOIN central_nodes c ON m.hub_id = c.hub_id
             WHERE m.mininode_id = :mid;

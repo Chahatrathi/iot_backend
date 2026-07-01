@@ -14,6 +14,14 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
   const isAdmin = userRole === 'SUPER_ADMIN' || userRole === 'LCB_TEAM';
   const isSuperAdmin = userRole === 'SUPER_ADMIN';
 
+  useEffect(() => {
+    window.scrollTo({
+      top: 0,
+      left: 0,
+      behavior: 'smooth' // You can change this to 'smooth' if you prefer an animated scroll
+    });
+  }, []);
+
   const [activeTab, setActiveTab] = useState('live'); 
   const [fleetData, setFleetData] = useState([]);
   const [allPlants, setAllPlants] = useState([]);
@@ -237,7 +245,7 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
       const nodeTime = isUTCNode ? new Date(isUTCNode).getTime() : 0;
       
       const nodeDiffHours = (now - nodeTime) / (1000 * 60 * 60);
-      if (nodeDiffHours > 3 || nodeTime === 0) {
+      if (nodeDiffHours > 0.5 || nodeTime === 0) {
         offlineNodesCount++;
         n.is_offline = true;
       } else {
@@ -255,7 +263,7 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
       lastSeenText = `${datePart}, ${timePart} IST`;
     }
 
-    if (hubDiffHours > 5) {
+    if (hubDiffHours > 0.5) {
       return { 
         status: 'INTERRUPTED', text: `INTERRUPTED // HUB LOST`, subText: `Last Sync: ${lastSeenText}`,
         color: 'text-red-400', bg: 'bg-red-950/50', border: 'border-red-900', icon: <WifiOff className="w-3 h-3 mr-1" /> 
@@ -274,7 +282,7 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
   };
 
   const renderLiveNodeGrid = (plantNodes) => {
-    return plantNodes.map((node, index) => {
+    return plantNodes.map((node) => {
       const isOffline = node.is_offline;
       return (
         <div 
@@ -283,9 +291,13 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
           className={`bg-[#0d1117] border p-3 rounded-lg text-center cursor-pointer transition-all group relative overflow-hidden ${isOffline ? 'border-red-900/50 hover:border-red-500 shadow-[inset_0_0_15px_rgba(239,68,68,0.1)]' : 'border-[#21262d] hover:border-cyan-400'}`}
         >
           {isOffline && <div className="absolute top-0 right-0 bg-red-900/80 text-white text-[8px] font-bold px-1.5 py-0.5 rounded-bl">OFFLINE</div>}
-          <div className={`absolute top-0 inset-x-0 h-0.5 opacity-0 group-hover:opacity-100 transition-opacity ${isOffline ? 'bg-red-500' : 'bg-gradient-to-r from-cyan-500 to-blue-500'}`} />
-          <Factory className={`w-5 h-5 mx-auto mb-1.5 transition-transform group-hover:scale-110 ${isOffline ? 'text-red-500/50' : 'text-emerald-400'}`} />
-          <div className={`font-bold font-mono text-xs tracking-wide ${isOffline ? 'text-gray-500' : 'text-white'}`}>Tank #{index + 1}</div>
+          <Factory className={`w-5 h-5 mx-auto mb-1.5 ${isOffline ? 'text-red-500/50' : 'text-emerald-400'}`} />
+          
+          {/* UPDATED: Displays the stored node_index as the Tank Number */}
+          <div className={`font-bold font-mono text-xs tracking-wide ${isOffline ? 'text-gray-500' : 'text-white'}`}>
+            Tank #{node.node_index || '?'}
+          </div>
+          
           <div className="text-[10px] font-mono text-gray-500 mt-1 truncate" title={`SN: ${node.mininode_id}`}>SN: {node.mininode_id}</div>
         </div>
       );
@@ -738,9 +750,11 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
   }
 
   const { factory, fleet } = pocDashboardData;
+  // FORCE SORTING BY node_index SO TANK #1 IS ALWAYS FIRST
+  const fleetDataForPOC = (pocDashboardData.fleet || []).sort((a, b) => a.node_index - b.node_index);
   const plantName = factory?.name || "Assigned Facility";
   const plantLocation = factory?.location || "Local Zone";
-  const uiState = getSystemStatus(fleet);
+  const uiState = getSystemStatus(fleetDataForPOC);
 
   return (
     <div className="space-y-6 font-sans text-gray-300">
@@ -775,11 +789,12 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
           </div>
         </div>
 
-        {fleet?.length === 0 ? (
+        {fleetDataForPOC?.length === 0 ? (
           <p className="text-xs font-mono text-gray-500 italic py-2">No active hardware identifiers broadcasting configuration indexes from this floor layout.</p>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
-            {renderLiveNodeGrid(fleet)}
+            {/* Pass the sorted fleetDataForPOC here */}
+            {renderLiveNodeGrid(fleetDataForPOC)}
           </div>
         )}
       </div>
@@ -797,7 +812,7 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
               <div className="mt-0.5"><WifiOff className="w-4 h-4 text-red-500" /></div>
               <div>
                 <div className="text-xs font-bold text-red-400">CRITICAL: Central Hub Disconnected</div>
-                <div className="text-[10px] text-gray-500 mt-0.5">The central WiFi router has failed to ping the cloud for over 5 hours. Please physically inspect the power line to the main hub.</div>
+                <div className="text-[10px] text-gray-500 mt-0.5">The central WiFi router has failed to ping the cloud for over 30 minute. Please physically inspect the power line to the main hub.</div>
               </div>
             </div>
           )}
@@ -807,7 +822,7 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
               <div className="mt-0.5"><AlertTriangle className="w-4 h-4 text-yellow-400" /></div>
               <div>
                 <div className="text-xs font-bold text-yellow-400">WARNING: Mini-Nodes Offline</div>
-                <div className="text-[10px] text-gray-500 mt-0.5">The central hub is online, but one or more tank nodes have failed to transmit data for over 3 hours. Check batteries or mesh range.</div>
+                <div className="text-[10px] text-gray-500 mt-0.5">The central hub is online, but one or more tank nodes have failed to transmit data for over 30 minutes. Check batteries or mesh range.</div>
               </div>
             </div>
           )}
