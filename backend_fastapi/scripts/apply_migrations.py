@@ -50,6 +50,86 @@ def get_db_url(override: str | None) -> str:
     return url
 
 
+def split_sql_statements(sql: str):
+    """Split a SQL file into individual statements.
+
+    PostgreSQL files may contain multiple statements; asyncpg refuses to prepare
+    more than one at a time. Splits on ';' that are outside single-quoted string
+    literals, outside '--' line comments, and outside $$...$$ dollar-quoted blocks.
+    """
+    statements = []
+    current = []
+    i = 0
+    n = len(sql)
+    in_string = False
+    in_comment = False
+    dollar_tag = None
+    while i < n:
+        c = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ""
+        if in_comment:
+            if c == "\n":
+                in_comment = False
+            else:
+                current.append(c)
+                i += 1
+                continue
+        if not in_string and dollar_tag is None and c == "-" and nxt == "-":
+            in_comment = True
+            current.append(c)
+            current.append(nxt)
+            i += 2
+            continue
+        if not in_string and c == "'":
+            in_string = True
+            current.append(c)
+            i += 1
+            continue
+        if in_string:
+            if c == "'" and nxt == "'":
+                current.append(c)
+                current.append(nxt)
+                i += 2
+                continue
+            if c == "'":
+                in_string = False
+            current.append(c)
+            i += 1
+            continue
+        # Detect start of a dollar-quoted block: $tag$ (tag may be empty).
+        if c == "$" and dollar_tag is None:
+            j = i + 1
+            while j < n and (sql[j].isalnum() or sql[j] == "_"):
+                j += 1
+            if j < n and sql[j] == "$":
+                dollar_tag = sql[i:j + 1]
+                current.append(dollar_tag)
+                i = j + 1
+                continue
+        if dollar_tag is not None:
+            if sql.startswith(dollar_tag, i):
+                current.append(dollar_tag)
+                i += len(dollar_tag)
+                dollar_tag = None
+                continue
+            current.append(c)
+            i += 1
+            continue
+        if c == ";":
+            stmt = "".join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+            i += 1
+            continue
+        current.append(c)
+        i += 1
+    tail = "".join(current).strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
 async def run(sql_url: str, dry_run: bool):
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine
@@ -94,9 +174,11 @@ async def run(sql_url: str, dry_run: bool):
 
     for f in pending:
         sql = f.read_text(encoding="utf-8")
-        print(f"  APPLYING {f.name} ({len(sql.splitlines())} lines)...")
+        statements = split_sql_statements(sql)
+        print(f"  APPLYING {f.name} ({len(sql.splitlines())} lines, {len(statements)} statements)...")
         async with engine.begin() as conn:  # one transaction per file
-            await conn.execute(text(sql))
+            for stmt in statements:
+                await conn.execute(text(stmt))
             await conn.execute(
                 text("INSERT INTO schema_migrations (filename) VALUES (:f)"),
                 {"f": f.name},

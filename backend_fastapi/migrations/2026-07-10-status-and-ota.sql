@@ -1,6 +1,6 @@
 -- Migration: heartbeat status tracking, boot-event logging, OTA firmware registry
 -- Run once against the production database, e.g.:
---   psql "postgresql://<user>:<pass>@<rds-host>:5432/postgres" -f 2026-07-10-status-and-ota.sql
+--   psql "postgresql://<user>:<pass>@<rds-host>/postgres" -f 2026-07-10-status-and-ota.sql
 -- Every statement is idempotent (IF NOT EXISTS), so re-running is harmless.
 
 -- 1. Relay boards now report their own liveness and physically-verified channel states
