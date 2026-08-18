@@ -43,6 +43,7 @@ export default function LoginView({ onLoginSuccess }) {
           role: data.user.role,
           username: data.user.username,
           factory_id: data.user.factory_id || 1, // Fallback scope matrix indicator
+          token: data.access_token, // Bearer token the API now requires on every protected call
         });
       } else {
         // Backend credential mismatch or missing registration rows
@@ -70,8 +71,11 @@ export default function LoginView({ onLoginSuccess }) {
         <div className="inline-flex items-center justify-center w-14 h-14 bg-[#f1c40f]/10 rounded-xl mb-4 border border-[#f1c40f]/20 shadow-[0_0_20px_rgba(241,196,15,0.15)]">
           <Cpu className="w-7 h-7 text-[#f5c542]" />
         </div>
-        <h1 className="text-3xl font-semibold text-white tracking-wide">IoT Control</h1>
+        <h1 className="text-3xl font-semibold text-white tracking-wide">Aracharat Ventures LLP</h1>
         <p className="text-xs text-gray-500 tracking-widest uppercase mt-1 font-mono">Fertilizer Manufacturing Control System</p>
+        <p className="text-xs text-gray-600 mt-2 font-mono">
+          <a href="https://www.aracharatventures.com/" target="_blank" rel="noopener noreferrer" className="text-[#22d3ee] hover:text-cyan-300 underline underline-offset-2">www.aracharatventures.com</a>
+        </p>
       </div>
 
       {/* Main Login Card */}

@@ -5,6 +5,7 @@ from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from app.config import get_db
+from app.security import require_roles, get_current_user, assert_factory_scope, verify_hub_key, ADMIN_ROLES
 
 router = APIRouter(prefix="/api/telemetry", tags=["Hardware Telemetry & Command"])
 
@@ -24,11 +25,33 @@ class SensorReading(BaseModel):
     mininode_id: str
     temperature: Optional[float] = None
     moisture: Optional[float] = None
+    # 0 = timer wake (normal deep-sleep cycle), 1 = cold boot (power restored / reset).
+    # Old firmware doesn't send this; None means "unknown", not "normal".
+    boot_reason: Optional[int] = None
+    # The mini node's own firmware version (nodes on >= 1.3.0 report it every wake;
+    # older nodes send nothing and keep their last-known value).
+    fw_version: Optional[str] = None
+
+class RelayStatusReport(BaseModel):
+    relay_mac: str
+    channel_states: List[int]  # 6 entries, index 0 = channel 1
+    uptime_seconds: int
+    # Relay boards on >= 1.3.0 report their firmware version in every status message.
+    fw_version: Optional[str] = None
 
 class HubPayload(BaseModel):
     hub_id: str
     uptime_seconds: int
     readings: List[SensorReading]
+    # "BOOT" on the hub's first call after power-up, "HEARTBEAT" for the 5-minute keepalive,
+    # absent on ordinary telemetry batches (old firmware sends nothing here).
+    event: Optional[str] = None
+    firmware_version: Optional[str] = None
+    relay_status: Optional[List[RelayStatusReport]] = None
+    # Direct-upload mini nodes (P2P deployments, no central hub) identify themselves here so
+    # the ingest can skip the hub-only dispatch machinery (command queue / desired states).
+    # The node posts hub_id = its own chip ID and is provisioned as its own central_nodes row.
+    node_type: Optional[str] = None
 
 class CommandAck(BaseModel):
     command_id: int
@@ -40,6 +63,7 @@ class HubAckPayload(BaseModel):
 
 class IntervalUpdateRequest(BaseModel):
     hub_id: str
+    mininode_id: str
     interval_minutes: int
 
 class CalibrationTrigger(BaseModel):
@@ -61,7 +85,7 @@ class SaveSweepMatrixSchema(BaseModel):
 # =====================================================================
 # 1. CORE INGESTION & BI-DIRECTIONAL DISPATCH (Adaptive Edge Engine)
 # =====================================================================
-@router.post("/ingest", status_code=status.HTTP_200_OK)
+@router.post("/ingest", status_code=status.HTTP_200_OK, dependencies=[Depends(verify_hub_key)])
 async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(get_db)):
     """
     Listens for central nodes, saves telemetry, and returns the C-compliant 
@@ -93,67 +117,156 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
                 "commands": []
             }
 
-        # 1. Update Hub Status ONLY
+        # P2P deployments (mini_node_p2p / relay_board_p2p): there is no central hub — every
+        # mini node is its own gateway and uploads directly with hub_id = its chip ID. Those
+        # nodes are fully autonomous: they decide fan/bulb states on-device and apply them
+        # over the mesh, so the hub-only dispatch machinery below (CENTRAL_HUB boot log,
+        # desired_states snapshot, autonomous command queue) must be skipped for them.
+        is_mini_node = payload.node_type == "MINI_NODE"
+
+        # 1. Update Hub Status (+ firmware_version, which the schema already had a column
+        #    for — COALESCE keeps the last-known version if an older Hub build doesn't send it)
         hub_query = text("""
-            UPDATE central_nodes 
-            SET status = 'ONLINE' , last_seen = :now
+            UPDATE central_nodes
+            SET status = 'ONLINE', last_seen = :now,
+                firmware_version = COALESCE(:fw, firmware_version)
             WHERE hub_id = :hub_id;
         """)
-        await db.execute(hub_query, {"hub_id": payload.hub_id, "now": current_time})
-        
+        await db.execute(hub_query, {"hub_id": payload.hub_id, "now": current_time, "fw": payload.firmware_version})
+
+        # Log hub power-cut recoveries so operations can see them per site
+        # (mini nodes log their own cold boots via boot_reason on each reading, so a
+        # direct-upload node does not also log a CENTRAL_HUB event here.)
+        if payload.event == "BOOT" and not is_mini_node:
+            await db.execute(
+                text("""
+                    INSERT INTO device_boot_logs (device_type, device_id, hub_id, boot_reason, firmware_version, logged_at)
+                    VALUES ('CENTRAL_HUB', :hub_id, :hub_id, 'POWER_ON', :fw, :now);
+                """),
+                {"hub_id": payload.hub_id, "fw": payload.firmware_version, "now": current_time}
+            )
+
+        # Relay board status piggybacked on the heartbeat: freshness + physically-reported channel states
+        if payload.relay_status:
+            for rs in payload.relay_status:
+                await db.execute(
+                    text("""
+                        UPDATE relay_boards
+                        SET last_seen = :now, reported_states = :states,
+                            firmware_version = COALESCE(:fw, firmware_version)
+                        WHERE relay_mac = :mac;
+                    """),
+                    {"now": current_time, "states": str(rs.channel_states), "fw": rs.fw_version, "mac": rs.relay_mac.strip()}
+                )
+                # A relay reporting <2 min of uptime just recovered from a power cut
+                if rs.uptime_seconds < 120:
+                    await db.execute(
+                        text("""
+                            INSERT INTO device_boot_logs (device_type, device_id, hub_id, boot_reason, logged_at)
+                            VALUES ('RELAY_BOARD', :mac, :hub_id, 'POWER_ON', :now);
+                        """),
+                        {"mac": rs.relay_mac.strip(), "hub_id": payload.hub_id, "now": current_time}
+                    )
+
         # Default fallback interval
-        c_interval_ms = 900000 
+        c_interval_ms = 900000
 
         # =====================================================================
-        # 2. Fetch specific hardware edge rules, calibration data, AND current state
+        # 2. Fetch hardware edge rules, calibration data, AND current state.
+        #    Telemetry batches fetch the reporting nodes; heartbeats (empty readings)
+        #    fetch every node under this hub, because the response must always carry
+        #    the full desired-state snapshot and rule set for offline caching.
         # =====================================================================
         node_ids = [r.mininode_id for r in payload.readings]
         edge_rules = []
-        node_states = {} 
-        
+        node_states = {}
+        desired_states = []
+
         if node_ids:
-            # --- UPDATED: Added fan_channel, bulb_channel, fan_status, and bulb_status ---
             nodes_query = text("""
-                SELECT mininode_id, temp_min, temp_max, moisture_min, moisture_max, 
+                SELECT mininode_id, temp_min, temp_max, moisture_min, moisture_max,
                        telemetry_interval_ms, raw_dry_cal, raw_wet_cal, last_smoothed_moisture,
                        calibration_mode, calibration_buffer, fan_relay_mac, bulb_relay_mac,
                        fan_channel, bulb_channel, fan_status, bulb_status,
-                       cycle_status, last_seen
+                       cycle_status, last_seen, node_index
                 FROM mini_nodes
                 WHERE mininode_id = ANY(:node_ids);
             """)
             nodes_res = await db.execute(nodes_query, {"node_ids": node_ids})
-            
-            for index, row in enumerate(nodes_res.mappings().all()):
-                if index == 0 and row["telemetry_interval_ms"]:
-                    c_interval_ms = row["telemetry_interval_ms"]
+        else:
+            nodes_query = text("""
+                SELECT mininode_id, temp_min, temp_max, moisture_min, moisture_max,
+                       telemetry_interval_ms, raw_dry_cal, raw_wet_cal, last_smoothed_moisture,
+                       calibration_mode, calibration_buffer, fan_relay_mac, bulb_relay_mac,
+                       fan_channel, bulb_channel, fan_status, bulb_status,
+                       cycle_status, last_seen, node_index
+                FROM mini_nodes
+                WHERE hub_id = :hub_id;
+            """)
+            nodes_res = await db.execute(nodes_query, {"hub_id": payload.hub_id})
 
-                # --- UPDATED: Cache relay configurations and current ON/OFF status here ---
-                node_states[row["mininode_id"]] = {
-                    "raw_dry_cal": row["raw_dry_cal"] or 2540,
-                    "raw_wet_cal": row["raw_wet_cal"] or 1200,
-                    "last_ema": row["last_smoothed_moisture"],
-                    "calibration_mode": row["calibration_mode"],
-                    "calibration_buffer": row["calibration_buffer"],
-                    "fan_relay_mac": row["fan_relay_mac"],
-                    "bulb_relay_mac": row["bulb_relay_mac"],
-                    "fan_channel": row["fan_channel"],
-                    "bulb_channel": row["bulb_channel"],
-                    "fan_status": row["fan_status"] or 0,
-                    "bulb_status": row["bulb_status"] or 0,
-                    "cycle_status": row["cycle_status"],
-                    "last_seen": row["last_seen"]
-                }
+        for index, row in enumerate(nodes_res.mappings().all()):
+            if index == 0 and row["telemetry_interval_ms"]:
+                c_interval_ms = row["telemetry_interval_ms"]
 
-                edge_rules.append({
-                    "mininode_id": row["mininode_id"],
-                    "temp_min": float(row["temp_min"]) if row["temp_min"] else 25.0,
-                    "temp_max": float(row["temp_max"]) if row["temp_max"] else 35.0,
-                    "moisture_min": float(row["moisture_min"]) if row["moisture_min"] else 40.0,
-                    "moisture_max": float(row["moisture_max"]) if row["moisture_max"] else 60.0
-                })
+            node_states[row["mininode_id"]] = {
+                "raw_dry_cal": row["raw_dry_cal"] or 2540,
+                "raw_wet_cal": row["raw_wet_cal"] or 1200,
+                "last_ema": row["last_smoothed_moisture"],
+                "calibration_mode": row["calibration_mode"],
+                "calibration_buffer": row["calibration_buffer"],
+                "fan_relay_mac": row["fan_relay_mac"],
+                "bulb_relay_mac": row["bulb_relay_mac"],
+                "fan_channel": row["fan_channel"],
+                "bulb_channel": row["bulb_channel"],
+                "fan_status": row["fan_status"] or 0,
+                "bulb_status": row["bulb_status"] or 0,
+                "cycle_status": row["cycle_status"],
+                "last_seen": row["last_seen"]
+            }
 
-               
+            # Relay mapping + calibration travel with the rules so the hub can evaluate
+            # thresholds locally (raw ADC -> percent) when the internet is down.
+            # node_index lets the hub's local portal label tanks the same way the
+            # cloud dashboard does ("Tank #N"), not just by serial.
+            edge_rules.append({
+                "mininode_id": row["mininode_id"],
+                "node_index": row["node_index"],
+                "temp_min": float(row["temp_min"]) if row["temp_min"] else 25.0,
+                "temp_max": float(row["temp_max"]) if row["temp_max"] else 35.0,
+                "moisture_min": float(row["moisture_min"]) if row["moisture_min"] else 40.0,
+                "moisture_max": float(row["moisture_max"]) if row["moisture_max"] else 60.0,
+                "raw_dry_cal": row["raw_dry_cal"] or 2540,
+                "raw_wet_cal": row["raw_wet_cal"] or 1200,
+                "fan_relay_mac": row["fan_relay_mac"],
+                "fan_channel": row["fan_channel"],
+                "bulb_relay_mac": row["bulb_relay_mac"],
+                "bulb_channel": row["bulb_channel"]
+            })
+
+            # Authoritative desired states — what each actuator SHOULD be right now.
+            # The hub dispatches these idempotently (only when they differ from its
+            # last-dispatched cache), which is what restores relays after a power cut.
+            # P2P mini nodes skip this: they apply states locally over the mesh and
+            # never poll /ingest for a desired-state snapshot.
+            if not is_mini_node:
+                if row["fan_relay_mac"] and row["fan_relay_mac"] != "UNASSIGNED" and row["fan_channel"]:
+                    desired_states.append({
+                        "relay_mac": row["fan_relay_mac"],
+                        "channel": row["fan_channel"],
+                        "state": row["fan_status"] or 0
+                    })
+                if row["bulb_relay_mac"] and row["bulb_relay_mac"] != "UNASSIGNED" and row["bulb_channel"]:
+                    desired_states.append({
+                        "relay_mac": row["bulb_relay_mac"],
+                        "channel": row["bulb_channel"],
+                        "state": row["bulb_status"] or 0
+                    })
+
+        # Hard ceiling: no device may go quieter than 15 minutes (business requirement)
+        c_interval_ms = min(c_interval_ms, 900000)
+
+
         # 3. Batch Process Telemetry Data
         if payload.readings:
             batch_data = []
@@ -161,7 +274,28 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
 
             for r in payload.readings:
                 state = node_states.get(r.mininode_id)
-                
+
+                # Firmware version travels with every reading from nodes on >= 1.3.0;
+                # only write when it actually changed to keep the hot path cheap.
+                if r.fw_version:
+                    await db.execute(
+                        text("""
+                            UPDATE mini_nodes SET firmware_version = :fw
+                            WHERE mininode_id = :mid AND firmware_version IS DISTINCT FROM :fw;
+                        """),
+                        {"fw": r.fw_version.strip(), "mid": r.mininode_id}
+                    )
+
+                # Mini node cold boots (power restored, not a timer wake) get logged per site
+                if r.boot_reason == 1:
+                    await db.execute(
+                        text("""
+                            INSERT INTO device_boot_logs (device_type, device_id, hub_id, boot_reason, firmware_version, logged_at)
+                            VALUES ('MINI_NODE', :mid, :hub_id, 'POWER_ON', :fw, :now);
+                        """),
+                        {"mid": r.mininode_id, "hub_id": payload.hub_id, "fw": r.fw_version, "now": current_time}
+                    )
+
                 if state and r.moisture is not None:
                     # =======================================================
                     # AUTOMATED CALIBRATION INTERCEPTOR
@@ -250,6 +384,12 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
                     # AUTONOMOUS LIMIT ENGINE: SMART STATE-AWARE RELAY DIFFING
                     # =====================================================================
                     rule = next((item for item in edge_rules if item["mininode_id"] == r.mininode_id), None)
+                    if is_mini_node:
+                        # P2P mini nodes are fully autonomous: they evaluate these same
+                        # thresholds on-device and apply fan/bulb states over the mesh
+                        # directly, so they never pull queued commands. Nulling the rule
+                        # skips the whole hub-only command dispatch below.
+                        rule = None
                     if rule:
                         calculated_fan_state = 0
                         calculated_bulb_state = 0
@@ -278,16 +418,21 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
                         current_bulb_state = state.get("bulb_status", 0)
 
                         # =====================================================================
-                        # NEW: TRUE HARDWARE STATE VERIFICATION (3-Minute Buffer)
+                        # NEW: TRUE HARDWARE STATE VERIFICATION (Time & Sync Logic Fixed)
                         # =====================================================================
                         expected_interval_sec = c_interval_ms / 1000
-                        # If uptime is less than interval + 180s grace period, it's a recent reboot
-                        recent_reboot = payload.uptime_seconds < (expected_interval_sec + 180)
+                        
+                        # FIX 1: Only true for the first 60 seconds after the ESP32 boots up
+                        recent_reboot = payload.uptime_seconds < 60
+                        
+                        # FIX 2: Triggers exactly once every 120 seconds. 
+                        # We check `< 15` assuming your ESP32 sends a ping at least every 10-12 seconds during testing.
+                        periodic_sync = (payload.uptime_seconds % 120) < 15
 
                         # 3. SMART QUEUE: EXHAUST FAN
                         if target_fan_mac and target_fan_mac != "UNASSIGNED":
                             # OVERRIDE triggered if states differ OR if hardware recently rebooted
-                            if (calculated_fan_state != current_fan_state) or recent_reboot:
+                            if (calculated_fan_state != current_fan_state) or recent_reboot or periodic_sync:
                                 # Flush old pending commands to prevent avalanches
                                 await db.execute(
                                     text("DELETE FROM relay_commands_queue WHERE hub_id = :hub_id AND relay_mac = :mac AND fan_channel IS NOT NULL AND status = 'PENDING'"),
@@ -301,24 +446,19 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
                                     """),
                                     {"hub_id": payload.hub_id.strip(), "relay_mac": target_fan_mac, "fan_ch": f_ch, "fan_state": calculated_fan_state, "now": current_time}
                                 )
-                                # Update Database Tracker
                                 await db.execute(
                                     text("UPDATE mini_nodes SET fan_status = :state WHERE mininode_id = :mid"),
                                     {"state": calculated_fan_state, "mid": r.mininode_id}
                                 )
-                                # Update Local Tracker 
                                 state["fan_status"] = calculated_fan_state
 
                         # 4. SMART QUEUE: HEATER BULB
                         if target_bulb_mac and target_bulb_mac != "UNASSIGNED":
-                            # OVERRIDE triggered if states differ OR if hardware recently rebooted
-                            if (calculated_bulb_state != current_bulb_state) or recent_reboot:
-                                # Flush old pending commands
+                            if (calculated_bulb_state != current_bulb_state) or recent_reboot or periodic_sync:
                                 await db.execute(
                                     text("DELETE FROM relay_commands_queue WHERE hub_id = :hub_id AND relay_mac = :mac AND bulb_channel IS NOT NULL AND status = 'PENDING'"),
                                     {"hub_id": payload.hub_id.strip(), "mac": target_bulb_mac}
                                 )
-                                # Queue the new authoritative command
                                 await db.execute(
                                     text("""
                                         INSERT INTO relay_commands_queue (hub_id, relay_mac, bulb_channel, bulb_state, status, created_at)
@@ -326,12 +466,12 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
                                     """),
                                     {"hub_id": payload.hub_id.strip(), "relay_mac": target_bulb_mac, "bulb_ch": b_ch, "bulb_state": calculated_bulb_state, "now": current_time}
                                 )
-                                # Update Database Tracker
                                 await db.execute(
                                     text("UPDATE mini_nodes SET bulb_status = :state WHERE mininode_id = :mid"),
                                     {"state": calculated_bulb_state, "mid": r.mininode_id}
                                 )
                                 state["bulb_status"] = calculated_bulb_state
+                                
             # Insert normal telemetry into database
             if batch_data:
                 insert_telemetry_query = text("""
@@ -341,6 +481,11 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
                 """)
                 await db.execute(insert_telemetry_query, batch_data)
 
+        # =====================================================================
+        # COMMIT INSERTS SO THE SELECT QUERY CAN SEE THEM
+        # =====================================================================
+        await db.commit()
+
         # 4. Fetch Pending Manual/Autonomous Override Commands
         fetch_commands_query = text("""
             SELECT id, relay_mac, fan_state, bulb_state, target_channel, fan_channel, bulb_channel 
@@ -349,10 +494,15 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
             ORDER BY created_at ASC;
         """)
         commands_result = await db.execute(fetch_commands_query, {"hub_id": payload.hub_id})
+        
         pending_commands = []
         command_ids = []
 
         for row in commands_result.mappings().all():
+            if is_mini_node:
+                # P2P mini nodes are autonomous and never pull commands; skip the queue
+                # entirely for them so stale PENDING entries do not pile up per node.
+                continue
             pending_commands.append({
                 "command_id": row["id"],
                 "relay_mac": row["relay_mac"],
@@ -364,6 +514,7 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
             })
             command_ids.append(row["id"])
 
+        # Mark commands as Dispatched so they don't get sent twice
         if command_ids:
             update_commands_query = text("""
                 UPDATE relay_commands_queue 
@@ -371,19 +522,22 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
                 WHERE id = ANY(:command_ids);
             """)
             await db.execute(update_commands_query, {"current_time": current_time, "command_ids": command_ids})
-
-        await db.commit()
+            await db.commit()
 
         return {
             "success": True,
             "system_config": {
                 "telemetry_interval_ms": c_interval_ms,
-                "urgent_interval_ms": 60000,          
-                "temp_warning_margin": 2.0,           
-                "moisture_warning_margin": 5.0,       
+                "urgent_interval_ms": 60000,
+                "temp_warning_margin": 2.0,
+                "moisture_warning_margin": 5.0,
                 "sync_time_utc": current_time.isoformat(),
-                "edge_rules": edge_rules              
+                "edge_rules": edge_rules
             },
+            # Authoritative actuator snapshot. The hub dispatches any entry that differs
+            # from its own last-dispatched cache — this is the power-cut recovery path,
+            # and also a continuous self-heal for relays that missed a queued command.
+            "desired_states": desired_states,
             "commands_count": len(pending_commands),
             "commands": pending_commands
         }
@@ -395,39 +549,99 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
 # =====================================================================
 # 2. HARDWARE COMMAND ACKNOWLEDGMENT
 # =====================================================================
-@router.post("/acknowledge", status_code=status.HTTP_200_OK)
-async def acknowledge_commands(payload: HubAckPayload, db: AsyncSession = Depends(get_db)):
-    if not payload.acknowledgments:
-        return {"success": True, "detail": "No acknowledgments provided."}
+@router.post("/acknowledge", status_code=status.HTTP_200_OK, dependencies=[Depends(verify_hub_key)])
+async def acknowledge_commands(payload: dict, db: AsyncSession = Depends(get_db)):
+    """Accepts two payload shapes:
 
+    1. What the Hub firmware actually sends — one physically-verified relay execution,
+       forwarded from the relay board's mesh ack:
+       {hub_id, relay_chip_id, channel, state, success, relay_mac?, timestamp_ms?}
+    2. The legacy queue-completion list this endpoint originally demanded:
+       {hub_id, acknowledgments: [{command_id, status}]}
+
+    Shape 1 was 422-ing against the strict legacy schema for as long as the firmware has
+    existed, so no execution proof was ever stored. The endpoint now takes a raw dict and
+    branches on shape instead of rejecting the one the hardware speaks."""
     try:
         current_time = datetime.utcnow()
-        for ack in payload.acknowledgments:
-            insert_ack_query = text("""
-                INSERT INTO relay_execution_acks (command_id, hub_id, execution_status, executed_at)
-                VALUES (:command_id, :hub_id, :status, :executed_at);
-            """)
-            await db.execute(insert_ack_query, {
-                "command_id": ack.command_id,
-                "hub_id": payload.hub_id,
-                "status": ack.status,
-                "executed_at": current_time
-            })
+        hub_id = str(payload.get("hub_id", "")).strip()
+        if not hub_id:
+            raise HTTPException(status_code=400, detail="hub_id is required.")
 
-            update_queue_query = text("""
-                UPDATE relay_commands_queue 
-                SET status = :status 
-                WHERE id = :command_id AND hub_id = :hub_id;
-            """)
-            await db.execute(update_queue_query, {
-                "status": "COMPLETED" if ack.status == "SUCCESS" else "FAILED",
-                "command_id": ack.command_id,
-                "hub_id": payload.hub_id
-            })
+        # --- Shape 1: hardware-verified ack from the mesh ---
+        if "relay_chip_id" in payload:
+            relay_mac = (payload.get("relay_mac") or "").strip() or None
+            if relay_mac:
+                # relay_mac carries an FK to relay_boards — log unknown MACs without the link
+                # rather than failing the whole ack on a constraint violation.
+                known = await db.execute(
+                    text("SELECT 1 FROM relay_boards WHERE relay_mac = :mac;"), {"mac": relay_mac}
+                )
+                if not known.first():
+                    relay_mac = None
+
+            succeeded = bool(payload.get("success"))
+            await db.execute(
+                text("""
+                    INSERT INTO relay_execution_acks
+                        (relay_id, relay_mac, channel, state, status, hub_id, execution_status, executed_at)
+                    VALUES (:rid, :mac, :ch, :st, :status, :hub, :estatus, :now);
+                """),
+                {
+                    "rid": str(payload.get("relay_chip_id")),
+                    "mac": relay_mac,
+                    "ch": int(payload.get("channel", 0)),
+                    "st": int(payload.get("state", 0)),
+                    "status": "VERIFIED_SUCCESS" if succeeded else "VERIFIED_FAILED",
+                    "hub": hub_id,
+                    "estatus": "SUCCESS" if succeeded else "FAILED",
+                    "now": current_time,
+                },
+            )
+            if relay_mac:
+                await db.execute(
+                    text("UPDATE relay_boards SET last_seen = :now WHERE relay_mac = :mac;"),
+                    {"now": current_time, "mac": relay_mac},
+                )
+            await db.commit()
+            return {"success": True, "detail": "Hardware ack recorded."}
+
+        # --- Shape 2: legacy queue-completion list ---
+        acknowledgments = payload.get("acknowledgments") or []
+        if not acknowledgments:
+            return {"success": True, "detail": "No acknowledgments provided."}
+
+        for ack in acknowledgments:
+            await db.execute(
+                text("""
+                    INSERT INTO relay_execution_acks (command_id, hub_id, execution_status, executed_at)
+                    VALUES (:command_id, :hub_id, :status, :executed_at);
+                """),
+                {
+                    "command_id": ack.get("command_id"),
+                    "hub_id": hub_id,
+                    "status": ack.get("status"),
+                    "executed_at": current_time,
+                },
+            )
+            await db.execute(
+                text("""
+                    UPDATE relay_commands_queue
+                    SET status = :status
+                    WHERE id = :command_id AND hub_id = :hub_id;
+                """),
+                {
+                    "status": "COMPLETED" if ack.get("status") == "SUCCESS" else "FAILED",
+                    "command_id": ack.get("command_id"),
+                    "hub_id": hub_id,
+                },
+            )
 
         await db.commit()
         return {"success": True, "detail": "Acknowledgments processed successfully."}
 
+    except HTTPException:
+        raise
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Acknowledgment Error: {str(e)}")
@@ -437,7 +651,9 @@ async def acknowledge_commands(payload: HubAckPayload, db: AsyncSession = Depend
 # 3. DYNAMIC INTERVAL CONFIGURATION (From UI)
 # =====================================================================
 @router.put("/update-interval", status_code=status.HTTP_200_OK)
-async def update_telemetry_interval(payload: IntervalUpdateRequest, db: AsyncSession = Depends(get_db)):
+async def update_telemetry_interval(
+    payload: IntervalUpdateRequest, db: AsyncSession = Depends(get_db), _: dict = Depends(require_roles(*ADMIN_ROLES))
+):
     if payload.interval_minutes <= 0:
         raise HTTPException(status_code=400, detail="Interval must be greater than 0.")
 
@@ -461,12 +677,14 @@ async def update_telemetry_interval(payload: IntervalUpdateRequest, db: AsyncSes
 # 4. SINGLE TANK DRILL-DOWN DATA (For React Graphs)
 # =====================================================================
 @router.get("/device/{mininode_id}", status_code=status.HTTP_200_OK)
-async def get_device_details(mininode_id: str, hours: int = 24, db: AsyncSession = Depends(get_db)):
+async def get_device_details(
+    mininode_id: str, hours: int = 24, db: AsyncSession = Depends(get_db), current_user: dict = Depends(get_current_user)
+):
     try:
         config_query = text("""
             SELECT m.mininode_id, m.fan_relay_mac, m.bulb_relay_mac, m.temp_min, m.temp_max,
                    m.moisture_min, m.moisture_max, m.telemetry_interval_ms, m.cycle_status, m.hub_id,
-                   m.last_seen AS node_last_seen, c.last_seen AS hub_last_seen, m.cycle_start_time,
+                   m.last_seen AS node_last_seen, c.last_seen AS hub_last_seen, c.factory_id, m.cycle_start_time,
                    m.fan_channel, m.bulb_channel, m.fan_status, m.bulb_status, m.node_index
             FROM mini_nodes m
             LEFT JOIN central_nodes c ON m.hub_id = c.hub_id
@@ -477,6 +695,8 @@ async def get_device_details(mininode_id: str, hours: int = 24, db: AsyncSession
 
         if not config_data:
             raise HTTPException(status_code=404, detail="Hardware node not found.")
+
+        assert_factory_scope(current_user, config_data["factory_id"])
 
         config_dict = dict(config_data)
         if config_dict.get("node_last_seen"): config_dict["node_last_seen"] = config_dict["node_last_seen"].isoformat()
@@ -530,7 +750,9 @@ async def get_device_details(mininode_id: str, hours: int = 24, db: AsyncSession
 # 5. MASTER OFF & PACKAGING NOTIFICATION TRIGGER
 # =====================================================================
 @router.post("/device/{mininode_id}/master-off", status_code=status.HTTP_200_OK)
-async def trigger_master_off(mininode_id: str, db: AsyncSession = Depends(get_db)):
+async def trigger_master_off(
+    mininode_id: str, db: AsyncSession = Depends(get_db), _: dict = Depends(require_roles(*ADMIN_ROLES))
+):
     try:
         node_query = text("SELECT hub_id, fan_relay_mac, bulb_relay_mac FROM mini_nodes WHERE mininode_id = :mid;")
         node_res = await db.execute(node_query, {"mid": mininode_id})
@@ -574,7 +796,9 @@ async def trigger_master_off(mininode_id: str, db: AsyncSession = Depends(get_db
 # 6. CONFIGURATION EDITOR
 # =====================================================================
 @router.put("/device/{mininode_id}/config", status_code=status.HTTP_200_OK)
-async def update_device_config(mininode_id: str, payload: dict, db: AsyncSession = Depends(get_db)):
+async def update_device_config(
+    mininode_id: str, payload: dict, db: AsyncSession = Depends(get_db), _: dict = Depends(require_roles(*ADMIN_ROLES))
+):
     try:
         query = text("""
             UPDATE mini_nodes 
@@ -597,7 +821,9 @@ async def update_device_config(mininode_id: str, payload: dict, db: AsyncSession
 # 7. COMMAND HISTORY (For UI Table)
 # =====================================================================
 @router.get("/device/{mininode_id}/history", status_code=status.HTTP_200_OK)
-async def get_device_history(mininode_id: str, db: AsyncSession = Depends(get_db)):
+async def get_device_history(
+    mininode_id: str, db: AsyncSession = Depends(get_db), _: dict = Depends(get_current_user)
+):
     acks = await db.execute(text("""
         SELECT * FROM relay_execution_acks 
         WHERE command_id IN (
@@ -614,7 +840,12 @@ async def get_device_history(mininode_id: str, db: AsyncSession = Depends(get_db
     return {"acks": [dict(r) for r in acks.mappings()]}
 
 @router.post("/device/{mininode_id}/calibrate", status_code=status.HTTP_200_OK)
-async def start_calibration_phase(mininode_id: str, payload: CalibrationTrigger, db: AsyncSession = Depends(get_db)):
+async def start_calibration_phase(
+    mininode_id: str,
+    payload: CalibrationTrigger,
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(require_roles(*ADMIN_ROLES)),
+):
     if payload.mode not in ["DRY", "WET"]:
         raise HTTPException(status_code=400, detail="Mode must be DRY or WET")
         
@@ -637,7 +868,9 @@ async def start_calibration_phase(mininode_id: str, payload: CalibrationTrigger,
 # 8. INTERACTIVE SWEEPER API (For React Configuration Wizard)
 # =====================================================================
 @router.post("/device/diagnostic-pulse", status_code=status.HTTP_200_OK)
-async def diagnostic_pulse_test(payload: AutomatedSweepSchema, db: AsyncSession = Depends(get_db)):
+async def diagnostic_pulse_test(
+    payload: AutomatedSweepSchema, db: AsyncSession = Depends(get_db), _: dict = Depends(require_roles("SUPER_ADMIN"))
+):
     try:
         # We now explicitly pass the `target_channel` to the queue so the ESP32 knows which pin to fire
         await db.execute(
@@ -661,7 +894,9 @@ async def diagnostic_pulse_test(payload: AutomatedSweepSchema, db: AsyncSession 
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/device/bind-confirmed-ports", status_code=status.HTTP_200_OK)
-async def bind_confirmed_ports(payload: SaveSweepMatrixSchema, db: AsyncSession = Depends(get_db)):
+async def bind_confirmed_ports(
+    payload: SaveSweepMatrixSchema, db: AsyncSession = Depends(get_db), _: dict = Depends(require_roles("SUPER_ADMIN"))
+):
     try:
         query = text("""
             UPDATE mini_nodes 

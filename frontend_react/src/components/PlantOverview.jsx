@@ -5,7 +5,7 @@ import {
   Cpu, Boxes, Compass, CheckCircle2, Factory, KeyRound, Wrench, Key, Edit3, Save, Plus,
   Clock, AlertTriangle, ArrowRight, Bell, Activity, Settings, Radio, Droplet, Wifi, WifiOff
 } from 'lucide-react';
-import { API_BASE_URL } from '../App';
+import { API_BASE_URL, authFetch } from '../App';
 
 export default function PlantOverview({ currentUser, user, session, onSelectDevice }) {
   
@@ -85,13 +85,13 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
   const syncAdminData = async () => {
     setLoading(true);
     try {
-      const topoRes = await fetch(`${API_BASE_URL}/api/onboard/fleet-topology`);
+      const topoRes = await authFetch(session, `${API_BASE_URL}/api/onboard/fleet-topology`);
       if (topoRes.ok) { const data = await topoRes.json(); setFleetData(data.fleet || []); }
 
-      const plantsRes = await fetch(`${API_BASE_URL}/api/onboard/all-plants`);
+      const plantsRes = await authFetch(session, `${API_BASE_URL}/api/onboard/all-plants`);
       if (plantsRes.ok) { const data = await plantsRes.json(); setAllPlants(data.plants || []); }
 
-      const usersRes = await fetch(`${API_BASE_URL}/api/onboard/directory-with-plants`);
+      const usersRes = await authFetch(session, `${API_BASE_URL}/api/onboard/directory-with-plants`);
       if (usersRes.ok) { const data = await usersRes.json(); setDirectoryUsers(data.users || []); }
     } catch (err) {
       console.error("Infrastructure sync failed:", err);
@@ -108,8 +108,8 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
     } else {
       const fetchPOCData = async () => {
         try {
-          const fid = activeUser.factory_id || 1; 
-          const response = await fetch(`${API_BASE_URL}/api/onboard/poc-dashboard/${fid}`);
+          const fid = activeUser.factory_id || 1;
+          const response = await authFetch(session, `${API_BASE_URL}/api/onboard/poc-dashboard/${fid}`);
           if (response.ok) {
             const data = await response.json();
             setPocDashboardData(data);
@@ -128,7 +128,7 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
     if (!pocName.trim() || !pocEmail.trim() || !pocPassword.trim() || !selectedPlant) return;
     setPocRegistering(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/absolute-diagnostic-register`, {
+      const response = await authFetch(session, `${API_BASE_URL}/api/absolute-diagnostic-register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ factory_id: parseInt(selectedPlant.id, 10), username: pocName.trim().split('@')[0], email: pocEmail.trim(), password: pocPassword.trim(), role: "PLANT_POC" })
@@ -143,7 +143,7 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
     try {
       const structuralUsername = globalEmail.trim().split('@')[0];
       const initialDefaultPass = "ClusterRootKey123!";
-      const response = await fetch(`${API_BASE_URL}/api/absolute-diagnostic-register`, {
+      const response = await authFetch(session, `${API_BASE_URL}/api/absolute-diagnostic-register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ factory_id: null, username: structuralUsername, email: globalEmail.trim(), password: initialDefaultPass, role: globalRole })
@@ -155,7 +155,7 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
   const handleChangePOCPassword = async (userId) => {
     if (!newPocPassword.trim()) return;
     try {
-      const response = await fetch(`${API_BASE_URL}/api/onboard/update-password`, {
+      const response = await authFetch(session, `${API_BASE_URL}/api/onboard/update-password`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId, new_password: newPocPassword.trim() })
@@ -177,7 +177,7 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
 
     setSubmitting(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/onboard/batch-provision-hardware`, {
+      const response = await authFetch(session, `${API_BASE_URL}/api/onboard/batch-provision-hardware`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -202,7 +202,7 @@ export default function PlantOverview({ currentUser, user, session, onSelectDevi
     if (!swapNewId.trim()) return;
     setIsSwapping(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/onboard/swap-hardware`, {
+      const response = await authFetch(session, `${API_BASE_URL}/api/onboard/swap-hardware`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

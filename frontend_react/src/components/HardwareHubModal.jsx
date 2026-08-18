@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { X, PlusCircle, UserPlus, Layers, ShieldCheck } from 'lucide-react';
-import { API_BASE_URL } from '../App';
+import { API_BASE_URL, authFetch } from '../App';
 
 export default function HardwareHubModal({ onClose, session }) {
   const [activeTab, setActiveTab] = useState('menu'); // 'menu' | 'factory' | 'user' | 'topology' | 'viewUsers'
@@ -27,7 +27,7 @@ export default function HardwareHubModal({ onClose, session }) {
   const fetchRegisteredUsers = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/users`); 
+      const response = await authFetch(session, `${API_BASE_URL}/api/users`);
       if (response.ok) {
         const data = await response.json();
         setDbUsers(data.users || []);
@@ -42,12 +42,9 @@ export default function HardwareHubModal({ onClose, session }) {
   // Submission handler for your administrative onboarding inputs
   const handleOnboardPost = async (path, bodyPayload) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/onboard/${path}`, {
+      const response = await authFetch(session, `${API_BASE_URL}/api/onboard/${path}`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session?.email || 'admin@system.com'}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(bodyPayload)
       });
 

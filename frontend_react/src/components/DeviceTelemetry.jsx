@@ -9,7 +9,7 @@ import {
   Chart as ChartJS, CategoryScale, LinearScale, 
   PointElement, LineElement, Tooltip, Legend, ScatterController
 } from 'chart.js';
-import { API_BASE_URL } from '../App';
+import { API_BASE_URL, authFetch } from '../App';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend, ScatterController);
 
@@ -52,7 +52,7 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
   // ==========================================
   const fetchDeviceData = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/telemetry/device/${deviceId}?hours=${timeRange}`);
+      const response = await authFetch(session, `${API_BASE_URL}/api/telemetry/device/${deviceId}?hours=${timeRange}`);
       if (response.ok) {
         const data = await response.json();
         setDeviceData({ config: data.config, history: data.history, master_off_events: data.master_off_events || [] });
@@ -89,7 +89,7 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
   const handleSaveConfig = async () => {
     setSavingConfig(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/telemetry/device/${deviceId}/config`, {
+      const response = await authFetch(session, `${API_BASE_URL}/api/telemetry/device/${deviceId}/config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -125,7 +125,7 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
 
     setTestingActive(true);
     try {
-      await fetch(`${API_BASE_URL}/api/telemetry/device/diagnostic-pulse`, {
+      await authFetch(session, `${API_BASE_URL}/api/telemetry/device/diagnostic-pulse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ relay_mac: targetRelay, hub_id: deviceData.config?.hub_id || 'HUB-F1-MAIN', channel: currentChannel, state: state })
@@ -158,7 +158,7 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
       return;
     }
     try {
-      const response = await fetch(`${API_BASE_URL}/api/telemetry/device/bind-confirmed-ports`, {
+      const response = await authFetch(session, `${API_BASE_URL}/api/telemetry/device/bind-confirmed-ports`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -187,7 +187,7 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
 
     setHalting(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/telemetry/device/${deviceId}/master-off`, { method: 'POST' });
+      const response = await authFetch(session, `${API_BASE_URL}/api/telemetry/device/${deviceId}/master-off`, { method: 'POST' });
       if (response.ok) {
         alert("Navyakosh batch concluded. Packaging notification broadcasted to plant floor.");
         fetchDeviceData();
@@ -202,7 +202,7 @@ export default function DeviceTelemetry({ session, deviceId, onBack }) {
 
     setIsCalibrating(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/telemetry/device/${deviceId}/calibrate`, {
+      const response = await authFetch(session, `${API_BASE_URL}/api/telemetry/device/${deviceId}/calibrate`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: mode })
       });
       if (response.ok) alert(`✅ ${mode} Calibration Initiated!`);

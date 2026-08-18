@@ -1,11 +1,15 @@
 import React, { useState } from 'react';
-import { LogOut, SlidersHorizontal } from 'lucide-react';
+import { LogOut, SlidersHorizontal, HardDrive, FileText } from 'lucide-react';
 import PlantOverview from './PlantOverview';
 import DeviceTelemetry from './DeviceTelemetry';
 import HardwareHubModal from './HardwareHubModal';
+import FleetStatus from './FleetStatus';
+import InvoicingModule from './InvoicingModule';
 
 export default function DashboardContainer({ session, onLogout, activeDevice, setActiveDevice }) {
   const [showHardwareHub, setShowHardwareHub] = useState(false);
+  const [showFleetStatus, setShowFleetStatus] = useState(false);
+  const [showInvoicing, setShowInvoicing] = useState(false);
 
   return (
     // Added px-4 sm:px-6 lg:px-8 to prevent the container from touching the screen edges on mobile
@@ -17,7 +21,7 @@ export default function DashboardContainer({ session, onLogout, activeDevice, se
         
         {/* Brand / Role Section */}
         <div className="flex items-center space-x-3 w-full md:w-auto justify-between md:justify-start">
-          <span className="text-xl font-bold text-white tracking-wide">IoT Control</span>
+          <span className="text-xl font-bold text-white tracking-wide">Aracharat Ventures LLP</span>
           <span className="bg-[#f5c542]/10 border border-[#f5c542]/30 text-[#f5c542] px-2.5 py-0.5 rounded-full text-xs font-medium font-mono">
             {session.role}
           </span>
@@ -32,18 +36,40 @@ export default function DashboardContainer({ session, onLogout, activeDevice, se
             <span className="text-gray-300 font-medium truncate max-w-[160px] sm:max-w-xs">
               {session.email}
             </span>
-            
-            {session.role === 'SUPER_ADMIN' && (
-              <button 
-                onClick={() => setShowHardwareHub(true)} 
-                className="mt-1 flex items-center space-x-1.5 text-xs text-[#f5c542] hover:text-[#e0b234] bg-[#f5c542]/5 border border-[#f5c542]/20 px-2.5 py-1 rounded transition-colors"
+
+            <div className="flex items-center space-x-2 mt-1">
+              <button
+                onClick={() => { setShowFleetStatus(true); setActiveDevice(null); }}
+                className="flex items-center space-x-1.5 text-xs text-[#22d3ee] hover:text-cyan-300 bg-[#22d3ee]/5 border border-[#22d3ee]/20 px-2.5 py-1 rounded transition-colors"
               >
-                <SlidersHorizontal className="w-3.5 h-3.5" />
-                {/* Shortened button text on mobile to save space */}
-                <span className="hidden sm:inline">Manage Hardware</span>
-                <span className="sm:hidden">Hardware</span>
+                <HardDrive className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Fleet &amp; Firmware</span>
+                <span className="sm:hidden">Fleet</span>
               </button>
-            )}
+
+              {session.role === 'SUPER_ADMIN' && (
+                <button
+                  onClick={() => setShowHardwareHub(true)}
+                  className="flex items-center space-x-1.5 text-xs text-[#f5c542] hover:text-[#e0b234] bg-[#f5c542]/5 border border-[#f5c542]/20 px-2.5 py-1 rounded transition-colors"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  {/* Shortened button text on mobile to save space */}
+                  <span className="hidden sm:inline">Manage Hardware</span>
+                  <span className="sm:hidden">Hardware</span>
+                </button>
+              )}
+
+              {session.role === 'SUPER_ADMIN' && (
+                <button
+                  onClick={() => setShowInvoicing(true)}
+                  className="flex items-center space-x-1.5 text-xs text-[#f5c542] hover:text-[#e0b234] bg-[#f5c542]/5 border border-[#f5c542]/20 px-2.5 py-1 rounded transition-colors"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Invoicing</span>
+                  <span className="sm:hidden">Invoicing</span>
+                </button>
+              )}
+            </div>
           </div>
           
           <button 
@@ -59,7 +85,9 @@ export default function DashboardContainer({ session, onLogout, activeDevice, se
       </header>
 
       {/* Dynamic View Toggler */}
-      {!activeDevice ? (
+      {showFleetStatus ? (
+        <FleetStatus session={session} onBack={() => setShowFleetStatus(false)} />
+      ) : !activeDevice ? (
         <PlantOverview session={session} onSelectDevice={setActiveDevice} />
       ) : (
         <DeviceTelemetry session={session} deviceId={activeDevice} onBack={() => setActiveDevice(null)} />
@@ -67,7 +95,12 @@ export default function DashboardContainer({ session, onLogout, activeDevice, se
 
       {/* Admin Topology Panel Hook */}
       {showHardwareHub && (
-        <HardwareHubModal onClose={() => setShowHardwareHub(false)} />
+        <HardwareHubModal session={session} onClose={() => setShowHardwareHub(false)} />
+      )}
+
+      {/* Invoicing Module Hook */}
+      {showInvoicing && (
+        <InvoicingModule session={session} onClose={() => setShowInvoicing(false)} />
       )}
     </div>
   );
