@@ -20,6 +20,7 @@ class FirmwarePublishSchema(BaseModel):
     url: str                                   # direct .bin download URL (GitHub Release asset)
     sha256: str = Field(..., min_length=64, max_length=64)
     notes: Optional[str] = None
+    size: Optional[int] = None                 # .bin size in bytes; lets hubs stage OTA on SD without a HEAD probe
 
 
 @router.get("/latest", dependencies=[Depends(verify_hub_key)])
@@ -33,7 +34,7 @@ async def get_latest_firmware(device_type: str, db: AsyncSession = Depends(get_d
 
     result = await db.execute(
         text("""
-            SELECT device_type, version, url, sha256, notes, released_at
+            SELECT device_type, version, url, sha256, notes, released_at, size
             FROM firmware_versions
             WHERE device_type = :dt AND active = TRUE
             ORDER BY released_at DESC
@@ -53,6 +54,7 @@ async def get_latest_firmware(device_type: str, db: AsyncSession = Depends(get_d
         "url": row["url"],
         "sha256": row["sha256"],
         "notes": row["notes"],
+        "size": row["size"],
         "released_at": row["released_at"].isoformat() if row["released_at"] else None,
     }
 
@@ -76,8 +78,8 @@ async def publish_firmware(
         )
         result = await db.execute(
             text("""
-                INSERT INTO firmware_versions (device_type, version, url, sha256, notes, released_at, active)
-                VALUES (:dt, :version, :url, :sha256, :notes, :now, TRUE)
+                INSERT INTO firmware_versions (device_type, version, url, sha256, notes, released_at, active, size)
+                VALUES (:dt, :version, :url, :sha256, :notes, :now, TRUE, :size)
                 RETURNING id, device_type, version;
             """),
             {
@@ -87,6 +89,7 @@ async def publish_firmware(
                 "sha256": payload.sha256.strip().lower(),
                 "notes": payload.notes,
                 "now": datetime.utcnow(),
+                "size": payload.size,
             }
         )
         await db.commit()
@@ -189,7 +192,7 @@ async def list_firmware_versions(
 ):
     result = await db.execute(
         text("""
-            SELECT id, device_type, version, url, sha256, notes, released_at, active
+            SELECT id, device_type, version, url, sha256, notes, released_at, active, size
             FROM firmware_versions
             ORDER BY released_at DESC;
         """)
