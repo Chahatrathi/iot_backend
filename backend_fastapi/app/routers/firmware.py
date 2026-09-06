@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Optional
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +14,24 @@ from app.security import ADMIN_ROLES, get_current_user, require_roles, verify_hu
 router = APIRouter(prefix="/api/firmware", tags=["Firmware OTA"])
 
 VALID_DEVICE_TYPES = ("CENTRAL_HUB", "MINI_NODE", "RELAY_BOARD")
+
+# Hub-side .bin downloads TLS-verify against ISRG Root X2 (Railway's chain), so
+# releases are ALSO served from here - a GitHub asset URL would fail the hub's
+# handshake. Integrity is still enforced by the manifest's sha256 on the device.
+STATIC_FW_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static_fw")
+
+
+@router.get("/files/{name}")
+async def get_firmware_file(name: str):
+    """Serves a release .bin baked into the image (app/static_fw/). Public by design:
+    the .bin itself is opaque; its integrity is enforced by the sha256 delivered to
+    the device over the authenticated /api/firmware/latest channel."""
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="bad file name")
+    path = os.path.join(STATIC_FW_DIR, name)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(path, media_type="application/octet-stream")
 
 
 class FirmwarePublishSchema(BaseModel):
