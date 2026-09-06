@@ -56,6 +56,10 @@ class HubPayload(BaseModel):
     # A2c: the hub's own OTA action summary (state/detail/attempts/ts), reported every
     # heartbeat so the cloud shows what the hub did and why anything failed.
     ota_status: Optional[dict] = None
+    # v2.3.0 absolute confirmation: the version read from the flash app descriptor
+    # (what is ACTUALLY executing) and the SD depot image (what is STORED on the card).
+    running_version: Optional[str] = None
+    sd_firmware: Optional[dict] = None
 
 class CommandAck(BaseModel):
     command_id: int
@@ -131,13 +135,18 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
             UPDATE central_nodes
             SET status = 'ONLINE', last_seen = :now,
                 firmware_version = COALESCE(:fw, firmware_version),
-                ota_status = COALESCE(:ota_status_json, ota_status)
+                ota_status = COALESCE(:ota_status_json, ota_status),
+                running_version = COALESCE(:running_version, running_version),
+                sd_firmware = COALESCE(:sd_firmware_json, sd_firmware)
             WHERE hub_id = :hub_id;
         """)
         ota_status_json = None
         if payload.ota_status is not None:
             ota_status_json = json.dumps(payload.ota_status)
-        await db.execute(hub_query, {"hub_id": payload.hub_id, "now": current_time, "fw": payload.firmware_version, "ota_status_json": ota_status_json})
+        sd_firmware_json = None
+        if payload.sd_firmware is not None:
+            sd_firmware_json = json.dumps(payload.sd_firmware)
+        await db.execute(hub_query, {"hub_id": payload.hub_id, "now": current_time, "fw": payload.firmware_version, "ota_status_json": ota_status_json, "running_version": payload.running_version, "sd_firmware_json": sd_firmware_json})
 
         # Tank auto-intake (singular flow): a reading from a tank this hub has never
         # reported before registers it as an INTAKE device so the FK holds and it
