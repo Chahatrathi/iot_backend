@@ -149,7 +149,7 @@ async def get_fleet_status(db: AsyncSession = Depends(get_db), current_user: dic
             }
 
         hub_query = """
-            SELECT c.hub_id, c.factory_id, f.name AS factory_name, c.status, c.last_seen, c.firmware_version
+            SELECT c.hub_id, c.factory_id, f.name AS factory_name, c.status, c.last_seen, c.firmware_version, c.ota_status
             FROM central_nodes c
             LEFT JOIN factories f ON c.factory_id = f.id
         """

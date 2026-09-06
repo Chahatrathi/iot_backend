@@ -1,4 +1,5 @@
 from datetime import timedelta, datetime
+import json
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from typing import List, Optional
@@ -52,6 +53,9 @@ class HubPayload(BaseModel):
     # the ingest can skip the hub-only dispatch machinery (command queue / desired states).
     # The node posts hub_id = its own chip ID and is provisioned as its own central_nodes row.
     node_type: Optional[str] = None
+    # A2c: the hub's own OTA action summary (state/detail/attempts/ts), reported every
+    # heartbeat so the cloud shows what the hub did and why anything failed.
+    ota_status: Optional[dict] = None
 
 class CommandAck(BaseModel):
     command_id: int
@@ -96,26 +100,23 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
         current_time = datetime.utcnow()
 
         # ---------------------------------------------------------
-        # NEW SAFETY SHIELD: Check if the Hub exists in the database
+        # Singular device flow, stage 1 (INTAKE): a device flashing our fleet
+        # firmware calls home on first boot. Its X-Hub-Key already proved fleet
+        # membership, so register it automatically as an unassigned INTAKE device -
+        # SUPER_ADMIN routes it to a manufacturer account from the intake screen.
         # ---------------------------------------------------------
         check_hub_query = text("SELECT hub_id FROM central_nodes WHERE hub_id = :hub_id;")
         hub_check_res = await db.execute(check_hub_query, {"hub_id": payload.hub_id})
         
         if not hub_check_res.first():
-            return {
-                "success": False,
-                "detail": "HARDWARE_NOT_PROVISIONED",
-                "system_config": {
-                    "telemetry_interval_ms": 900000, 
-                    "urgent_interval_ms": 900000,
-                    "temp_warning_margin": 2.0,
-                    "moisture_warning_margin": 5.0,
-                    "sync_time_utc": current_time.isoformat(),
-                    "edge_rules": []
-                },
-                "commands_count": 0,
-                "commands": []
-            }
+            await db.execute(
+                text("""
+                    INSERT INTO central_nodes (hub_id, stage, stage_updated_at, status, firmware_version, last_seen)
+                    VALUES (:hub_id, 'INTAKE', :now, 'ONLINE', :fw, :now);
+                """),
+                {"hub_id": payload.hub_id, "now": current_time, "fw": payload.firmware_version}
+            )
+            print(f"[INTAKE] Auto-registered unknown device {payload.hub_id} as INTAKE")
 
         # P2P deployments (mini_node_p2p / relay_board_p2p): there is no central hub — every
         # mini node is its own gateway and uploads directly with hub_id = its chip ID. Those
@@ -129,10 +130,40 @@ async def ingest_hardware_data(payload: HubPayload, db: AsyncSession = Depends(g
         hub_query = text("""
             UPDATE central_nodes
             SET status = 'ONLINE', last_seen = :now,
-                firmware_version = COALESCE(:fw, firmware_version)
+                firmware_version = COALESCE(:fw, firmware_version),
+                ota_status = COALESCE(:ota_status_json, ota_status)
             WHERE hub_id = :hub_id;
         """)
-        await db.execute(hub_query, {"hub_id": payload.hub_id, "now": current_time, "fw": payload.firmware_version})
+        ota_status_json = None
+        if payload.ota_status is not None:
+            ota_status_json = json.dumps(payload.ota_status)
+        await db.execute(hub_query, {"hub_id": payload.hub_id, "now": current_time, "fw": payload.firmware_version, "ota_status_json": ota_status_json})
+
+        # Tank auto-intake (singular flow): a reading from a tank this hub has never
+        # reported before registers it as an INTAKE device so the FK holds and it
+        # surfaces in the intake screen. Covers bench sim tanks and new field tanks.
+        if payload.readings:
+            known_res = await db.execute(
+                text("SELECT mininode_id FROM mini_nodes WHERE hub_id = :hub_id;"),
+                {"hub_id": payload.hub_id}
+            )
+            known_ids = {row["mininode_id"] for row in known_res.mappings().all()}
+            for r in payload.readings:
+                mid = (r.mininode_id or "").strip()
+                if mid and mid not in known_ids:
+                    await db.execute(
+                        text("""
+                            INSERT INTO mini_nodes (mininode_id, hub_id, fan_channel, bulb_channel,
+                                                    node_index, stage, firmware_version, last_seen)
+                            VALUES (:mid, :hub_id, 1, 2,
+                                    (SELECT COALESCE(MAX(node_index), 0) + 1 FROM mini_nodes WHERE hub_id = :hub_id_sub),
+                                    'INTAKE', :fw, :now)
+                            ON CONFLICT (mininode_id) DO NOTHING;
+                        """),
+                        {"mid": mid, "hub_id": payload.hub_id, "hub_id_sub": payload.hub_id, "fw": r.fw_version, "now": current_time}
+                    )
+                    known_ids.add(mid)
+                    print(f"[INTAKE] Auto-registered tank {mid} under hub {payload.hub_id}")
 
         # Log hub power-cut recoveries so operations can see them per site
         # (mini nodes log their own cold boots via boot_reason on each reading, so a
