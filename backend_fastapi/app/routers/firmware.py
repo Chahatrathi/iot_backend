@@ -2,7 +2,9 @@ from datetime import datetime
 from typing import Optional
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.responses import FileResponse, StreamingResponse
+import re
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -22,16 +24,65 @@ STATIC_FW_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__f
 
 
 @router.get("/files/{name}")
-async def get_firmware_file(name: str):
+async def get_firmware_file(name: str, range_header: Optional[str] = Header(None, alias="Range")):
     """Serves a release .bin baked into the image (app/static_fw/). Public by design:
     the .bin itself is opaque; its integrity is enforced by the sha256 delivered to
-    the device over the authenticated /api/firmware/latest channel."""
+    the device over the authenticated /api/firmware/latest channel.
+    Range requests are honored with 206 + Content-Range - the hub's OTA staging
+    resumes each download slice with a Range GET, and refuses a 200 on a ranged
+    request (misaligned-write protection)."""
     if "/" in name or "\\" in name or ".." in name:
         raise HTTPException(status_code=400, detail="bad file name")
     path = os.path.join(STATIC_FW_DIR, name)
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(path, media_type="application/octet-stream")
+    file_size = os.path.getsize(path)
+
+    range_match = None
+    if range_header:
+        m = re.match(r"bytes=(\d*)-(\d*)$", range_header.strip())
+        if m:
+            start_s, end_s = m.group(1), m.group(2)
+            if start_s == "" and end_s == "":
+                range_match = None  # "bytes=-" invalid → full response
+            elif start_s == "":
+                # suffix range: last N bytes
+                n = int(end_s)
+                range_match = (max(0, file_size - n), file_size - 1)
+            else:
+                start = int(start_s)
+                end = int(end_s) if end_s else file_size - 1
+                if start >= file_size:
+                    raise HTTPException(status_code=416, detail="range not satisfiable")
+                range_match = (start, min(end, file_size - 1))
+
+    if range_match:
+        start, end = range_match
+        chunk_len = end - start + 1
+
+        def file_iter():
+            with open(path, "rb") as fh:
+                fh.seek(start)
+                remaining = chunk_len
+                while remaining > 0:
+                    data = fh.read(min(65536, remaining))
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        return StreamingResponse(
+            file_iter(),
+            status_code=206,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(chunk_len),
+            },
+        )
+
+    return FileResponse(path, media_type="application/octet-stream", headers={"Accept-Ranges": "bytes"})
 
 
 class FirmwarePublishSchema(BaseModel):
